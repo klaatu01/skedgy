@@ -226,3 +226,137 @@ enum SkedgyCommand<T: SkedgyHandler> {
     AddAt(DateTime<Utc>, SkedgyTask<T>),
     AddCron(String, SkedgyTask<T>),
 }
+
+#[cfg(test)]
+mod tests {
+    use futures::lock::Mutex;
+
+    use super::*;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct MockHandler {
+        counter: Arc<Mutex<i32>>,
+        done_tx: Option<async_channel::Sender<()>>,
+    }
+
+    impl MockHandler {
+        fn new(counter: Arc<Mutex<i32>>, done_tx: Option<async_channel::Sender<()>>) -> Self {
+            MockHandler { counter, done_tx }
+        }
+    }
+
+    impl SkedgyHandler for MockHandler {
+        async fn handle(&self) {
+            let mut count = self.counter.lock().await;
+            *count += 1;
+            if let Some(tx) = &self.done_tx {
+                tx.send(()).await.expect("Failed to send done signal");
+            }
+        }
+    }
+
+    fn create_scheduler<T: SkedgyHandler>(tick_interval: Duration) -> Skedgy<T> {
+        let config = SkedgyConfig { tick_interval };
+        Skedgy::new(config).expect("Failed to create scheduler")
+    }
+
+    #[tokio::test]
+    async fn test_run_at() {
+        let counter = Arc::new(Mutex::new(0));
+        let (tx, rx) = async_channel::bounded(1);
+        let handler = MockHandler::new(counter.clone(), Some(tx));
+
+        let mut scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let run_at = Utc::now() + Duration::from_millis(200);
+        scheduler
+            .run_at(run_at, handler)
+            .await
+            .expect("Failed to schedule task");
+
+        rx.recv().await.expect("Failed to receive done signal");
+        assert_eq!(*counter.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_in() {
+        let counter = Arc::new(Mutex::new(0));
+        let (tx, rx) = async_channel::bounded(1);
+        let handler = MockHandler::new(counter.clone(), Some(tx));
+
+        let mut scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        scheduler
+            .run_in(Duration::from_millis(200), handler)
+            .await
+            .expect("Failed to schedule task");
+
+        rx.recv().await.expect("Failed to receive done signal");
+        assert_eq!(*counter.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_cron() {
+        let counter = Arc::new(Mutex::new(0));
+        let (tx, rx) = async_channel::bounded(1);
+        let handler = MockHandler::new(counter.clone(), Some(tx));
+
+        let mut scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        scheduler
+            .cron("0/1 * * * * * *", handler)
+            .await
+            .expect("Failed to schedule cron task");
+
+        rx.recv().await.expect("Failed to receive done signal");
+        // Since cron runs every second, the first run will immediately trigger.
+        assert_eq!(*counter.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_schedules() {
+        let counter = Arc::new(Mutex::new(0));
+        let (tx1, rx1) = async_channel::bounded(1);
+        let handler1 = MockHandler::new(counter.clone(), Some(tx1));
+
+        let (tx2, rx2) = async_channel::bounded(1);
+        let handler2 = MockHandler::new(counter.clone(), Some(tx2));
+
+        let mut scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+
+        let run_at = Utc::now() + Duration::from_millis(200);
+        scheduler
+            .run_at(run_at, handler1)
+            .await
+            .expect("Failed to schedule task");
+
+        scheduler
+            .run_in(Duration::from_millis(400), handler2)
+            .await
+            .expect("Failed to schedule task");
+
+        rx1.recv()
+            .await
+            .expect("Failed to receive done signal for first task");
+        assert_eq!(*counter.lock().await, 1);
+
+        rx2.recv()
+            .await
+            .expect("Failed to receive done signal for second task");
+        assert_eq!(*counter.lock().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_cron() {
+        let counter = Arc::new(Mutex::new(0));
+        let handler = MockHandler::new(counter.clone(), None);
+
+        let mut scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let result = scheduler.cron("invalid_cron_expression", handler).await;
+
+        assert!(result.is_err());
+        if let Err(SkedgyError::InvalidCron) = result {
+            // Expected error
+        } else {
+            panic!("Expected InvalidCron error");
+        }
+    }
+}
