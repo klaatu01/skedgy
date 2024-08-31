@@ -7,7 +7,7 @@ description = "A simple asynchronous job scheduler"
 repository = "https://github.com/klaatu01/skedgy"
 documentation = "https://docs.rs/klaatu01/0.0.1/skedgy/"
 readme = "README.md"
-keywords = ["scheduler", "async", "job", "cron", "task", "schedule"]
+keywords = ["scheduler", "async", "job", "cron", "schedule"]
 
 
 [dependencies]
