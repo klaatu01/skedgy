@@ -11,16 +11,8 @@ Skedgy is a lightweight, asynchronous task scheduler written in Rust. It allows 
 
 ## Installation
 
-Add the following to your `Cargo.toml`:
-
-```toml
-[dependencies]
-tokio = { version = "1", features = ["full", "macros"] }
-async-channel = "1.7"
-chrono = "0.4"
-nanoid = "0.4"
-cron = "0.9"
-log = "0.4"
+```bash
+cargo add skedgy
 ```
 
 ## Usage
