@@ -1,7 +1,13 @@
 [package]
 name = "skedgy"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
+license = "MIT"
+description = "A simple asynchronous job scheduler"
+repository = "https://github.com/klaatu01/skedgy"
+readme = "README.md"
+keywords = ["scheduler", "async", "job", "cron", "task", "schedule"]
+
 
 [dependencies]
 async-channel = "2.3.1"
