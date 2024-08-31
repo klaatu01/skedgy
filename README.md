@@ -69,24 +69,6 @@ scheduler.cron("0/1 * * * * * *", MyTask).await.expect("Failed to schedule cron 
 
 The scheduler is automatically run when it is created and will continue to process tasks until the program ends.
 
-## Running Tests
-
-To run the tests, use the following command:
-
-```sh
-cargo test
-```
-
-Make sure to include the necessary dependencies in your `Cargo.toml`:
-
-```toml
-[dev-dependencies]
-tokio = { version = "1", features = ["full", "macros"] }
-async-trait = "0.1"
-```
-
-The test suite includes tests for scheduling tasks at specific times, after delays, and with cron expressions. It also checks error handling for invalid cron expressions.
-
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a pull request or open an issue.
