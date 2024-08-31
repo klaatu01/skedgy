@@ -12,7 +12,7 @@ pub struct Skedgy<T: SkedgyHandler> {
 }
 
 impl<T: SkedgyHandler> Skedgy<T> {
-    pub fn new(config: SkedgyConfig) -> Self {
+    pub fn new(config: SkedgyConfig) -> Result<Self, SkedgyError> {
         let (tx, rx) = async_channel::unbounded();
         let mut scheduler = SchedulerLoop {
             config,
@@ -21,31 +21,32 @@ impl<T: SkedgyHandler> Skedgy<T> {
             rx,
         };
         tokio::spawn(async move {
-            scheduler.run().await;
+            if let Err(e) = scheduler.run().await {
+                log::error!("Scheduler encountered an error: {}", e);
+            }
         });
-        Self { tx }
+        Ok(Self { tx })
     }
 
-    pub async fn run_at(&mut self, datetime: DateTime<Utc>, handler: T) {
+    pub async fn run_at(&mut self, datetime: DateTime<Utc>, handler: T) -> Result<(), SkedgyError> {
         self.tx
             .send(SkedgyCommand::AddAt(datetime, handler.into()))
             .await
-            .unwrap();
+            .map_err(|_| SkedgyError::SendError)?;
+        Ok(())
     }
 
-    pub async fn run_in(&mut self, duration: Duration, handler: T) {
+    pub async fn run_in(&mut self, duration: Duration, handler: T) -> Result<(), SkedgyError> {
         let datetime = Utc::now() + duration;
-        self.run_at(datetime, handler).await;
+        self.run_at(datetime, handler).await
     }
 
     pub async fn cron(&mut self, cron: &str, handler: T) -> Result<(), SkedgyError> {
-        if cron::Schedule::from_str(cron).is_err() {
-            return Err(SkedgyError::InvalidCron);
-        }
+        cron::Schedule::from_str(cron).map_err(|_| SkedgyError::InvalidCron)?;
         self.tx
             .send(SkedgyCommand::AddCron(cron.to_string(), handler.into()))
             .await
-            .unwrap();
+            .map_err(|_| SkedgyError::SendError)?;
         Ok(())
     }
 }
@@ -55,6 +56,7 @@ pub enum SkedgyError {
     SendError,
     RecvError,
     InvalidCron,
+    TickError,
 }
 
 impl Error for SkedgyError {}
@@ -65,6 +67,7 @@ impl std::fmt::Display for SkedgyError {
             SkedgyError::SendError => write!(f, "Error sending message to scheduler"),
             SkedgyError::RecvError => write!(f, "Error receiving message from scheduler"),
             SkedgyError::InvalidCron => write!(f, "Invalid cron expression"),
+            SkedgyError::TickError => write!(f, "Error during scheduler tick"),
         }
     }
 }
@@ -85,8 +88,6 @@ impl<T: SkedgyHandler> SchedulerLoop<T> {
         self.crons.entry(cron).or_default().push(task);
     }
 
-    /// Query the scheduler for all tasks that are scheduled to run before the given instant.
-    /// This will remove the tasks from the scheduler.
     fn query(&mut self, end: DateTime<Utc>) -> Vec<SkedgyTask<T>> {
         let after = self.schedules.split_off(&end);
         let before = self
@@ -102,10 +103,9 @@ impl<T: SkedgyHandler> SchedulerLoop<T> {
     fn query_crons(&mut self, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<SkedgyTask<T>> {
         let mut tasks = Vec::new();
         for (cron, cron_tasks) in self.crons.iter() {
-            // Parse the cron expression to create a schedule
             let schedule = match cron::Schedule::from_str(cron) {
                 Ok(schedule) => schedule,
-                Err(_) => continue, // Skip invalid cron expressions
+                Err(_) => continue,
             };
 
             let upcoming_runs = schedule.after(&start);
@@ -138,7 +138,7 @@ impl<T: SkedgyHandler> SchedulerLoop<T> {
         }
     }
 
-    fn handle_schedules(&mut self, tasks: Vec<SkedgyTask<T>>) {
+    fn handle_schedules(&self, tasks: Vec<SkedgyTask<T>>) {
         tokio::spawn(async move {
             for task in tasks {
                 task.handler.handle().await;
@@ -159,13 +159,13 @@ impl<T: SkedgyHandler> SchedulerLoop<T> {
         }
     }
 
-    async fn run(&mut self) {
+    async fn run(&mut self) -> Result<(), SkedgyError> {
         let mut last_tick_start = chrono::Utc::now();
         loop {
             log::debug!("Scheduler tick");
             let tick_start = chrono::Utc::now();
-            // drain the receiver
-            let commands = self.drain_channel().await.unwrap();
+
+            let commands = self.drain_channel().await?;
             self.handle_commands(commands);
 
             let tasks = self.query(tick_start);
@@ -175,7 +175,11 @@ impl<T: SkedgyHandler> SchedulerLoop<T> {
             self.handle_schedules(crons);
 
             let tick_end = chrono::Utc::now();
-            let tick_duration = tick_end.signed_duration_since(tick_start).to_std().unwrap();
+            let tick_duration = tick_end
+                .signed_duration_since(tick_start)
+                .to_std()
+                .map_err(|_| SkedgyError::TickError)?;
+
             if tick_duration < self.config.tick_interval {
                 log::debug!(
                     "Sleeping for {:?}",
@@ -185,6 +189,7 @@ impl<T: SkedgyHandler> SchedulerLoop<T> {
             } else {
                 log::warn!("Scheduler tick took longer than the tick interval");
             }
+
             last_tick_start = tick_start;
             log::debug!("Scheduler tick took {:?}", tick_duration);
         }
@@ -193,8 +198,6 @@ impl<T: SkedgyHandler> SchedulerLoop<T> {
 
 #[derive(Debug, Clone)]
 pub struct SkedgyConfig {
-    /// The interval at which the scheduler will check for new tasks, this is the minimum interval.
-    /// This can also be seen as the scheduler's resolution.
     pub tick_interval: Duration,
 }
 
