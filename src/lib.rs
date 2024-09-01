@@ -27,7 +27,9 @@
 use std::{collections::BTreeMap, error::Error, str::FromStr, time::Duration};
 
 use chrono::{DateTime, Utc};
+use cron::Schedule;
 use nanoid::nanoid;
+use serde::{Deserialize, Serialize};
 
 /// A trait for defining task handlers that can be scheduled by the `Skedgy` scheduler.
 /// Implement this trait for your task handler and define the task's behavior in the `handle` method.
@@ -39,50 +41,237 @@ pub trait SkedgyHandler: Clone + Send + 'static {
 /// Create a new `Skedgy` instance using the `new` method and schedule tasks using the `run_at`, `run_in`, and `cron` methods.
 pub struct Skedgy<T: SkedgyHandler> {
     tx: async_channel::Sender<SkedgyCommand<T>>,
+    terminate_tx: async_channel::Sender<async_channel::Sender<()>>,
+}
+
+fn serialize_datetime<S>(datetime: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&datetime.to_rfc3339())
+}
+
+fn deserialize_datetime<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    DateTime::parse_from_rfc3339(&s)
+        .map_err(serde::de::Error::custom)
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn serialize_schedule<S>(schedule: &Schedule, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&schedule.to_string())
+}
+
+fn deserialize_schedule<'de, D>(deserializer: D) -> Result<Schedule, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Schedule::from_str(&s).map_err(serde::de::Error::custom)
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub enum TaskKind {
+    #[serde(
+        serialize_with = "serialize_datetime",
+        deserialize_with = "deserialize_datetime"
+    )]
+    At(DateTime<Utc>),
+
+    In(Duration),
+
+    #[serde(
+        serialize_with = "serialize_schedule",
+        deserialize_with = "deserialize_schedule"
+    )]
+    Cron(Schedule),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SkedgyTask<T: SkedgyHandler> {
+    id: String,
+    kind: TaskKind,
+    handler: T,
+}
+
+impl<T: SkedgyHandler> SkedgyTask<T> {
+    pub fn named(id: &str) -> SkedgyTaskBuilder<T> {
+        SkedgyTaskBuilder::named(id)
+    }
+
+    pub fn anonymous() -> SkedgyTaskBuilder<T> {
+        SkedgyTaskBuilder::new()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SkedgyState<T: SkedgyHandler> {
+    tasks: Vec<SkedgyTask<T>>,
+}
+
+impl<T: SkedgyHandler> SkedgyState<T> {
+    pub fn new(
+        crons: Vec<(Schedule, SkedgyTask<T>)>,
+        schedules: BTreeMap<DateTime<Utc>, Vec<SkedgyTask<T>>>,
+    ) -> Self {
+        Self {
+            tasks: crons
+                .into_iter()
+                .map(|(_, task)| task)
+                .chain(schedules.values().flat_map(|v| v.iter().cloned()))
+                .collect(),
+        }
+    }
+
+    pub fn crons(&self) -> Vec<(Schedule, SkedgyTask<T>)> {
+        self.tasks
+            .iter()
+            .filter_map(|task| match &task.kind {
+                TaskKind::Cron(schedule) => Some((schedule.clone(), task.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn schedules(&self) -> BTreeMap<DateTime<Utc>, Vec<SkedgyTask<T>>> {
+        let mut schedules: BTreeMap<DateTime<Utc>, Vec<SkedgyTask<T>>> = BTreeMap::new();
+        for task in &self.tasks {
+            if let TaskKind::At(datetime) = &task.kind {
+                schedules.entry(*datetime).or_default().push(task.clone());
+            }
+        }
+        schedules
+    }
+}
+
+pub struct SkedgyTaskBuilder<T: SkedgyHandler> {
+    kind: Option<TaskKind>,
+    handler: Option<T>,
+    id: Option<String>,
+}
+
+impl<T: SkedgyHandler> SkedgyTaskBuilder<T> {
+    pub fn named(id: &str) -> Self {
+        Self {
+            kind: None,
+            handler: None,
+            id: Some(id.to_string()),
+        }
+    }
+
+    pub fn new() -> Self {
+        Self {
+            kind: None,
+            handler: None,
+            id: nanoid!(10).into(),
+        }
+    }
+
+    pub fn at(&mut self, datetime: DateTime<Utc>) -> &mut Self {
+        self.kind = Some(TaskKind::At(datetime));
+        self
+    }
+
+    pub fn r#in(&mut self, duration: Duration) -> &mut Self {
+        let datetime = Utc::now() + duration;
+        self.kind = Some(TaskKind::At(datetime));
+        self
+    }
+
+    pub fn cron(&mut self, pattern: &str) -> Result<&mut Self, SkedgyError> {
+        let schedule = cron::Schedule::from_str(pattern).map_err(|_| SkedgyError::InvalidCron)?;
+        self.kind = Some(TaskKind::Cron(schedule));
+        Ok(self)
+    }
+
+    pub fn handler(&mut self, handler: T) -> &mut Self {
+        self.handler = Some(handler);
+        self
+    }
+
+    pub fn build(&self) -> Result<SkedgyTask<T>, SkedgyError> {
+        let kind = self.kind.clone().ok_or(SkedgyError::InvalidCron)?;
+        let handler = self.handler.clone().ok_or(SkedgyError::InvalidCron)?;
+        let id = self.id.clone().unwrap_or_else(|| nanoid!(10));
+        Ok(SkedgyTask { id, kind, handler })
+    }
 }
 
 impl<T: SkedgyHandler> Skedgy<T> {
     pub fn new(config: SkedgyConfig) -> Self {
         let (tx, rx) = async_channel::unbounded();
-        let mut scheduler = SchedulerLoop {
-            config,
-            schedules: BTreeMap::new(),
-            crons: BTreeMap::new(),
-            rx,
-        };
+        let (terminate_tx, terminate_rx) = async_channel::bounded(1);
+        let mut scheduler = SkedgyScheduler::new(config, rx, terminate_rx);
         tokio::spawn(async move {
             if let Err(e) = scheduler.run().await {
                 log::error!("Scheduler encountered an error: {}", e);
             }
         });
-        Self { tx }
+        Self { tx, terminate_tx }
     }
 
     /// Schedule a task to run at a specific `DateTime<Utc>`.
     /// The `handler` parameter should be a struct that implements the `SkedgyHandler` trait.
-    pub async fn run_at(&mut self, datetime: DateTime<Utc>, handler: T) -> Result<(), SkedgyError> {
+    pub async fn schedule(&self, task: SkedgyTask<T>) -> Result<(), SkedgyError> {
         self.tx
-            .send(SkedgyCommand::AddAt(datetime, handler.into()))
+            .send(SkedgyCommand::Add(task))
             .await
             .map_err(|_| SkedgyError::SendError)?;
         Ok(())
     }
 
-    /// Schedule a task to run after a specified `Duration`.
-    /// The `handler` parameter should be a struct that implements the `SkedgyHandler` trait.
-    pub async fn run_in(&mut self, duration: Duration, handler: T) -> Result<(), SkedgyError> {
-        let datetime = Utc::now() + duration;
-        self.run_at(datetime, handler).await
-    }
-
-    /// Schedule a task using a cron expression.
-    /// The `handler` parameter should be a struct that implements the `SkedgyHandler` trait.
-    pub async fn cron(&mut self, cron: &str, handler: T) -> Result<(), SkedgyError> {
-        cron::Schedule::from_str(cron).map_err(|_| SkedgyError::InvalidCron)?;
+    /// Remove a cron task by its ID.
+    /// The `id` parameter should be the ID returned by the `cron` method.
+    pub async fn remove(&self, id: &str) -> Result<(), SkedgyError> {
         self.tx
-            .send(SkedgyCommand::AddCron(cron.to_string(), handler.into()))
+            .send(SkedgyCommand::Remove(id.to_string()))
             .await
             .map_err(|_| SkedgyError::SendError)?;
+        Ok(())
+    }
+
+    /// Update an existing task with a new schedule.
+    /// The `handler` parameter should be a struct that implements the `SkedgyHandler` trait.
+    pub async fn update(&self, task: SkedgyTask<T>) -> Result<(), SkedgyError> {
+        self.tx
+            .send(SkedgyCommand::Update(task))
+            .await
+            .map_err(|_| SkedgyError::SendError)?;
+        Ok(())
+    }
+
+    /// Get the current state of the scheduler, including all scheduled tasks.
+    pub async fn state(&self) -> Result<SkedgyState<T>, SkedgyError> {
+        let (tx, rx) = async_channel::bounded(1);
+        self.tx
+            .send(SkedgyCommand::GetState(tx))
+            .await
+            .map_err(|_| SkedgyError::SendError)?;
+        rx.recv().await.map_err(|_| SkedgyError::RecvError)
+    }
+
+    /// Load a previous state into the scheduler.
+    pub async fn load(&self, state: SkedgyState<T>) -> Result<(), SkedgyError> {
+        self.tx
+            .send(SkedgyCommand::LoadState(state))
+            .await
+            .map_err(|_| SkedgyError::SendError)?;
+        Ok(())
+    }
+
+    pub async fn stop(&self) -> Result<(), SkedgyError> {
+        let (tx, rx) = async_channel::bounded(1);
+        self.terminate_tx
+            .send(tx)
+            .await
+            .map_err(|_| SkedgyError::SendError)?;
+        rx.recv().await.map_err(|_| SkedgyError::RecvError)?;
         Ok(())
     }
 }
@@ -113,20 +302,39 @@ impl std::fmt::Display for SkedgyError {
     }
 }
 
-struct SchedulerLoop<T: SkedgyHandler> {
+struct SkedgyScheduler<T: SkedgyHandler> {
     config: SkedgyConfig,
     schedules: BTreeMap<DateTime<Utc>, Vec<SkedgyTask<T>>>,
-    crons: BTreeMap<String, Vec<SkedgyTask<T>>>,
+    crons: Vec<(cron::Schedule, SkedgyTask<T>)>,
     rx: async_channel::Receiver<SkedgyCommand<T>>,
+    terminate_rx: async_channel::Receiver<async_channel::Sender<()>>,
 }
 
-impl<T: SkedgyHandler> SchedulerLoop<T> {
+impl<T: SkedgyHandler> SkedgyScheduler<T> {
+    fn new(
+        config: SkedgyConfig,
+        rx: async_channel::Receiver<SkedgyCommand<T>>,
+        terminate_rx: async_channel::Receiver<async_channel::Sender<()>>,
+    ) -> Self {
+        Self {
+            config,
+            schedules: BTreeMap::new(),
+            crons: Vec::new(),
+            rx,
+            terminate_rx,
+        }
+    }
+
     fn insert(&mut self, datetime: DateTime<Utc>, task: SkedgyTask<T>) {
         self.schedules.entry(datetime).or_default().push(task);
     }
 
-    fn insert_cron(&mut self, cron: String, task: SkedgyTask<T>) {
-        self.crons.entry(cron).or_default().push(task);
+    fn insert_cron(&mut self, schedule: Schedule, task: SkedgyTask<T>) {
+        self.crons.push((schedule, task));
+    }
+
+    fn remove_cron(&mut self, id: String) {
+        self.crons.retain(|(_, task)| task.id != id);
     }
 
     fn query(&mut self, end: DateTime<Utc>) -> Vec<SkedgyTask<T>> {
@@ -142,25 +350,20 @@ impl<T: SkedgyHandler> SchedulerLoop<T> {
     }
 
     fn query_crons(&mut self, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<SkedgyTask<T>> {
-        let mut tasks = Vec::new();
-        for (cron, cron_tasks) in self.crons.iter() {
-            let schedule = match cron::Schedule::from_str(cron) {
-                Ok(schedule) => schedule,
-                Err(_) => continue,
-            };
-
-            let upcoming_runs = schedule.after(&start);
-            for run_time in upcoming_runs {
-                if run_time > end {
-                    break;
+        self.crons
+            .iter()
+            .filter_map(|(schedule, task)| {
+                let upcoming_runs = schedule.after(&start);
+                let runs: Vec<_> = upcoming_runs
+                    .take_while(|run_time| run_time < &end)
+                    .collect();
+                if runs.is_empty() {
+                    None
+                } else {
+                    Some(task.clone())
                 }
-
-                for task in cron_tasks.iter() {
-                    tasks.push(task.clone());
-                }
-            }
-        }
-        tasks
+            })
+            .collect()
     }
 
     async fn drain_channel(&mut self) -> Result<Vec<SkedgyCommand<T>>, SkedgyError> {
@@ -181,38 +384,84 @@ impl<T: SkedgyHandler> SchedulerLoop<T> {
 
     fn handle_schedules(&self, tasks: Vec<SkedgyTask<T>>) {
         tokio::spawn(async move {
-            for task in tasks {
-                task.handler.handle().await;
-            }
+            futures::future::join_all(tasks.iter().map(|task| task.handler.handle())).await;
         });
     }
 
-    fn handle_commands(&mut self, commands: Vec<SkedgyCommand<T>>) {
+    async fn handle_commands(&mut self, commands: Vec<SkedgyCommand<T>>) {
         for command in commands {
-            self.handle_command(command);
+            self.handle_command(command).await;
         }
     }
 
-    fn handle_command(&mut self, command: SkedgyCommand<T>) {
+    fn state(&mut self) -> SkedgyState<T> {
+        SkedgyState::new(self.crons.clone(), self.schedules.clone())
+    }
+
+    fn load(&mut self, state: SkedgyState<T>) {
+        self.crons = state.crons();
+        self.schedules = state.schedules();
+    }
+
+    async fn handle_command(&mut self, command: SkedgyCommand<T>) {
         match command {
-            SkedgyCommand::AddAt(datetime, handler) => self.insert(datetime, handler),
-            SkedgyCommand::AddCron(cron, handler) => self.insert_cron(cron, handler),
+            SkedgyCommand::Add(task) => match task.kind {
+                TaskKind::At(datetime) => self.insert(datetime, task),
+                TaskKind::In(duration) => {
+                    let datetime = Utc::now() + duration;
+                    self.insert(datetime, task);
+                }
+                TaskKind::Cron(ref schedule) => self.insert_cron(schedule.clone(), task),
+            },
+            SkedgyCommand::Remove(id) => {
+                self.schedules.values_mut().for_each(|v| {
+                    v.retain(|t| t.id != id);
+                });
+                self.remove_cron(id);
+            }
+            SkedgyCommand::Update(task) => match task.kind {
+                TaskKind::At(datetime) => self.insert(datetime, task),
+                TaskKind::In(duration) => {
+                    let datetime = Utc::now() + duration;
+                    self.insert(datetime, task);
+                }
+                TaskKind::Cron(ref schedule) => {
+                    self.remove_cron(task.id.clone());
+                    self.insert_cron(schedule.clone(), task);
+                }
+            },
+            SkedgyCommand::GetState(tx) => {
+                let state = self.state();
+                let _ = tx.send(state).await;
+            }
+            SkedgyCommand::LoadState(state) => {
+                self.load(state);
+            }
         }
     }
 
     async fn run(&mut self) -> Result<(), SkedgyError> {
         let mut last_tick_start = chrono::Utc::now();
         loop {
+            if let Ok(tx) = self.terminate_rx.try_recv() {
+                let _ = tx.send(()).await;
+                log::info!("Terminating scheduler");
+                return Ok(());
+            }
+
             log::debug!("Scheduler tick");
             let tick_start = chrono::Utc::now();
 
             let commands = self.drain_channel().await?;
-            self.handle_commands(commands);
+            log::debug!("Received {} commands", commands.len());
+            self.handle_commands(commands).await;
 
             let tasks = self.query(tick_start);
+            log::debug!("Running {} tasks", tasks.len());
             self.handle_schedules(tasks);
 
             let crons = self.query_crons(last_tick_start, tick_start);
+            log::debug!("Running {} cron tasks", crons.len());
             self.handle_schedules(crons);
 
             let tick_end = chrono::Utc::now();
@@ -243,31 +492,12 @@ pub struct SkedgyConfig {
     pub tick_interval: Duration,
 }
 
-#[derive(Debug, Clone)]
-struct SkedgyTask<T: SkedgyHandler> {
-    #[allow(dead_code)]
-    pub id: String,
-    pub handler: T,
-}
-
-impl<T: SkedgyHandler> SkedgyTask<T> {
-    pub fn new(handler: T) -> Self {
-        Self {
-            handler,
-            id: nanoid!(10),
-        }
-    }
-}
-
-impl<T: SkedgyHandler> From<T> for SkedgyTask<T> {
-    fn from(handler: T) -> Self {
-        Self::new(handler)
-    }
-}
-
 enum SkedgyCommand<T: SkedgyHandler> {
-    AddAt(DateTime<Utc>, SkedgyTask<T>),
-    AddCron(String, SkedgyTask<T>),
+    Add(SkedgyTask<T>),
+    Remove(String),
+    Update(SkedgyTask<T>),
+    GetState(async_channel::Sender<SkedgyState<T>>),
+    LoadState(SkedgyState<T>),
 }
 
 #[cfg(test)]
@@ -310,10 +540,16 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let mut scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
         let run_at = Utc::now() + Duration::from_millis(200);
+        let task = SkedgyTaskBuilder::named("test_task")
+            .at(run_at)
+            .handler(handler)
+            .build()
+            .expect("Failed to build task");
+
         scheduler
-            .run_at(run_at, handler)
+            .schedule(task)
             .await
             .expect("Failed to schedule task");
 
@@ -327,9 +563,14 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let mut scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let task = SkedgyTaskBuilder::named("test_task")
+            .r#in(Duration::from_millis(200))
+            .handler(handler)
+            .build()
+            .expect("Failed to build task");
         scheduler
-            .run_in(Duration::from_millis(200), handler)
+            .schedule(task)
             .await
             .expect("Failed to schedule task");
 
@@ -343,9 +584,16 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let mut scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let task = SkedgyTaskBuilder::named("test_task")
+            .cron("0/1 * * * * * *")
+            .expect("Failed to build task")
+            .handler(handler)
+            .build()
+            .expect("Failed to build task");
+
         scheduler
-            .cron("0/1 * * * * * *", handler)
+            .schedule(task)
             .await
             .expect("Failed to schedule cron task");
 
@@ -363,16 +611,28 @@ mod tests {
         let (tx2, rx2) = async_channel::bounded(1);
         let handler2 = MockHandler::new(counter.clone(), Some(tx2));
 
-        let mut scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
 
         let run_at = Utc::now() + Duration::from_millis(200);
+        let task1 = SkedgyTaskBuilder::named("task1")
+            .at(run_at)
+            .handler(handler1)
+            .build()
+            .expect("Failed to build task");
+
+        let task2 = SkedgyTaskBuilder::named("task2")
+            .r#in(Duration::from_millis(400))
+            .handler(handler2)
+            .build()
+            .expect("Failed to build task");
+
         scheduler
-            .run_at(run_at, handler1)
+            .schedule(task1)
             .await
             .expect("Failed to schedule task");
 
         scheduler
-            .run_in(Duration::from_millis(400), handler2)
+            .schedule(task2)
             .await
             .expect("Failed to schedule task");
 
@@ -385,21 +645,5 @@ mod tests {
             .await
             .expect("Failed to receive done signal for second task");
         assert_eq!(*counter.lock().await, 2);
-    }
-
-    #[tokio::test]
-    async fn test_invalid_cron() {
-        let counter = Arc::new(Mutex::new(0));
-        let handler = MockHandler::new(counter.clone(), None);
-
-        let mut scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
-        let result = scheduler.cron("invalid_cron_expression", handler).await;
-
-        assert!(result.is_err());
-        if let Err(SkedgyError::InvalidCron) = result {
-            // Expected error
-        } else {
-            panic!("Expected InvalidCron error");
-        }
     }
 }
