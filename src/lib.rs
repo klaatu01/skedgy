@@ -73,7 +73,9 @@ mod tests {
     }
 
     fn create_scheduler<T: SkedgyHandler>(tick_interval: Duration, ctx: T::Context) -> Skedgy<T> {
-        let config = SkedgyConfig { tick_interval };
+        let config = SkedgyConfig {
+            look_ahead_duration: tick_interval,
+        };
         Skedgy::new(config, ctx)
     }
 
