@@ -23,22 +23,28 @@
 //! ## License
 //!
 //! This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-pub mod command;
-pub mod config;
-pub mod context;
-pub mod error;
-pub mod handler;
-pub mod scheduler;
-pub mod utils;
+mod command;
+mod config;
+mod context;
+mod error;
+mod handler;
+mod scheduler;
+mod utils;
+
+pub use config::SkedgyConfig;
+pub use context::SkedgyContext;
+pub use error::SkedgyError;
+pub use handler::SkedgyHandler;
+pub use scheduler::{Skedgy, SkedgyTask, SkedgyTaskBuilder};
 
 #[cfg(test)]
 mod tests {
-    use futures::lock::Mutex;
-
     use super::*;
-    use crate::handler::SkedgyHandler;
-    use crate::scheduler::{Skedgy, SkedgyConfig, SkedgyTaskBuilder};
+    use crate::{SkedgyHandler, SkedgyTaskBuilder};
+    use chrono::Utc;
+    use futures::lock::Mutex;
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[derive(Clone)]
     struct MockHandler {
