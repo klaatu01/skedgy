@@ -4,7 +4,7 @@ use crate::handler::SkedgyHandler;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, error::Error, str::FromStr, time::Duration};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SkedgyState<T: SkedgyHandler> {
