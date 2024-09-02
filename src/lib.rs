@@ -33,8 +33,9 @@ use serde::{Deserialize, Serialize};
 
 /// A trait for defining task handlers that can be scheduled by the `Skedgy` scheduler.
 /// Implement this trait for your task handler and define the task's behavior in the `handle` method.
-pub trait SkedgyHandler: Clone + Send + 'static {
-    fn handle(&self) -> impl std::future::Future<Output = ()> + Send;
+pub trait SkedgyHandler: Clone + Send + Sync + 'static {
+    type Context: SkedgyContext + Send + Sync + 'static;
+    fn handle(&self, ctx: Self::Context) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// The main scheduler struct that allows you to schedule tasks to run at specific times, after delays, or using cron expressions.
@@ -204,10 +205,10 @@ impl<T: SkedgyHandler> SkedgyTaskBuilder<T> {
 }
 
 impl<T: SkedgyHandler> Skedgy<T> {
-    pub fn new(config: SkedgyConfig) -> Self {
+    pub fn new(config: SkedgyConfig, ctx: T::Context) -> Self {
         let (tx, rx) = async_channel::unbounded();
         let (terminate_tx, terminate_rx) = async_channel::bounded(1);
-        let mut scheduler = SkedgyScheduler::new(config, rx, terminate_rx);
+        let mut scheduler = SkedgyScheduler::new(config, rx, terminate_rx, ctx);
         tokio::spawn(async move {
             if let Err(e) = scheduler.run().await {
                 log::error!("Scheduler encountered an error: {}", e);
@@ -308,6 +309,7 @@ struct SkedgyScheduler<T: SkedgyHandler> {
     crons: Vec<(cron::Schedule, SkedgyTask<T>)>,
     rx: async_channel::Receiver<SkedgyCommand<T>>,
     terminate_rx: async_channel::Receiver<async_channel::Sender<()>>,
+    ctx: T::Context,
 }
 
 impl<T: SkedgyHandler> SkedgyScheduler<T> {
@@ -315,6 +317,7 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
         config: SkedgyConfig,
         rx: async_channel::Receiver<SkedgyCommand<T>>,
         terminate_rx: async_channel::Receiver<async_channel::Sender<()>>,
+        ctx: T::Context,
     ) -> Self {
         Self {
             config,
@@ -322,6 +325,7 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
             crons: Vec::new(),
             rx,
             terminate_rx,
+            ctx,
         }
     }
 
@@ -383,8 +387,20 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
     }
 
     fn handle_schedules(&self, tasks: Vec<SkedgyTask<T>>) {
+        let tasks: Vec<_> = tasks
+            .into_iter()
+            .map(|task| {
+                let ctx = self.ctx.clone();
+                (ctx, task)
+            })
+            .collect();
         tokio::spawn(async move {
-            futures::future::join_all(tasks.iter().map(|task| task.handler.handle())).await;
+            futures::future::join_all(
+                tasks
+                    .into_iter()
+                    .map(|(ctx, task)| async move { task.handler.handle(ctx).await }),
+            )
+            .await;
         });
     }
 
@@ -486,6 +502,10 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
     }
 }
 
+pub trait SkedgyContext: Clone {}
+
+impl<T: Clone> SkedgyContext for T {}
+
 /// Configuration for the `Skedgy` scheduler.
 #[derive(Debug, Clone)]
 pub struct SkedgyConfig {
@@ -519,8 +539,12 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct MockContext {}
+
     impl SkedgyHandler for MockHandler {
-        async fn handle(&self) {
+        type Context = MockContext;
+        async fn handle(&self, _ctx: Self::Context) {
             let mut count = self.counter.lock().await;
             *count += 1;
             if let Some(tx) = &self.done_tx {
@@ -529,9 +553,9 @@ mod tests {
         }
     }
 
-    fn create_scheduler<T: SkedgyHandler>(tick_interval: Duration) -> Skedgy<T> {
+    fn create_scheduler<T: SkedgyHandler>(tick_interval: Duration, ctx: T::Context) -> Skedgy<T> {
         let config = SkedgyConfig { tick_interval };
-        Skedgy::new(config)
+        Skedgy::new(config, ctx)
     }
 
     #[tokio::test]
@@ -540,7 +564,7 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
         let run_at = Utc::now() + Duration::from_millis(200);
         let task = SkedgyTaskBuilder::named("test_task")
             .at(run_at)
@@ -563,7 +587,7 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
         let task = SkedgyTaskBuilder::named("test_task")
             .r#in(Duration::from_millis(200))
             .handler(handler)
@@ -584,7 +608,7 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
         let task = SkedgyTaskBuilder::named("test_task")
             .cron("0/1 * * * * * *")
             .expect("Failed to build task")
@@ -598,7 +622,6 @@ mod tests {
             .expect("Failed to schedule cron task");
 
         rx.recv().await.expect("Failed to receive done signal");
-        // Since cron runs every second, the first run will immediately trigger.
         assert_eq!(*counter.lock().await, 1);
     }
 
@@ -611,7 +634,7 @@ mod tests {
         let (tx2, rx2) = async_channel::bounded(1);
         let handler2 = MockHandler::new(counter.clone(), Some(tx2));
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100));
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
 
         let run_at = Utc::now() + Duration::from_millis(200);
         let task1 = SkedgyTaskBuilder::named("task1")
@@ -645,5 +668,99 @@ mod tests {
             .await
             .expect("Failed to receive done signal for second task");
         assert_eq!(*counter.lock().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_remove_task() {
+        let counter = Arc::new(Mutex::new(0));
+        let handler = MockHandler::new(counter.clone(), None);
+
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
+        let run_at = Utc::now() + Duration::from_millis(200);
+        let task = SkedgyTaskBuilder::named("remove_task")
+            .at(run_at)
+            .handler(handler)
+            .build()
+            .expect("Failed to build task");
+
+        scheduler
+            .schedule(task.clone())
+            .await
+            .expect("Failed to schedule task");
+
+        scheduler
+            .remove("remove_task")
+            .await
+            .expect("Failed to remove task");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert_eq!(*counter.lock().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_update_task() {
+        let counter = Arc::new(Mutex::new(0));
+        let (tx, rx) = async_channel::bounded(1);
+        let handler = MockHandler::new(counter.clone(), Some(tx));
+
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
+        let run_at = Utc::now() + Duration::from_millis(500);
+        let original_task = SkedgyTaskBuilder::named("update_task")
+            .at(run_at)
+            .handler(handler.clone())
+            .build()
+            .expect("Failed to build task");
+
+        scheduler
+            .schedule(original_task)
+            .await
+            .expect("Failed to schedule task");
+
+        let updated_run_at = Utc::now() + Duration::from_millis(200);
+        let updated_task = SkedgyTaskBuilder::named("update_task")
+            .at(updated_run_at)
+            .handler(handler)
+            .build()
+            .expect("Failed to build updated task");
+
+        scheduler
+            .update(updated_task)
+            .await
+            .expect("Failed to update task");
+
+        rx.recv().await.expect("Failed to receive done signal");
+
+        assert_eq!(*counter.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_remove_cron_task() {
+        let counter = Arc::new(Mutex::new(0));
+        let handler = MockHandler::new(counter.clone(), None);
+
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
+        let task = SkedgyTaskBuilder::named("cron_task")
+            .cron("0/1 * * * * * *")
+            .expect("Failed to build cron task")
+            .handler(handler)
+            .build()
+            .expect("Failed to build task");
+
+        scheduler
+            .schedule(task.clone())
+            .await
+            .expect("Failed to schedule cron task");
+
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        scheduler
+            .remove("cron_task")
+            .await
+            .expect("Failed to remove cron task");
+
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        assert_eq!(*counter.lock().await, 1);
     }
 }
