@@ -63,7 +63,7 @@ mod tests {
 
     impl SkedgyHandler for MockHandler {
         type Context = MockContext;
-        async fn handle(&self, _ctx: Self::Context) {
+        async fn handle(&self, _ctx: &Self::Context) {
             let mut count = self.counter.lock().await;
             *count += 1;
             if let Some(tx) = &self.done_tx {
@@ -257,10 +257,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_cron_task() {
+        env_logger::init();
         let counter = Arc::new(Mutex::new(0));
         let handler = MockHandler::new(counter.clone(), None);
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(10), MockContext {});
+
         let task = SkedgyTaskBuilder::named("cron_task")
             .cron("0/1 * * * * * *")
             .expect("Failed to build cron task")

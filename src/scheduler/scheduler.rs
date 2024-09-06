@@ -17,9 +17,10 @@ pub(crate) struct SkedgyScheduler<T: SkedgyHandler> {
     config: SkedgyConfig,
     schedules: BTreeMap<DateTime<Utc>, Vec<SkedgyTask<T>>>,
     crons: Vec<(cron::Schedule, SkedgyTask<T>)>,
+    last_cron_run: Option<DateTime<Utc>>,
     rx: async_channel::Receiver<SkedgyCommand<T>>,
     terminate_rx: async_channel::Receiver<async_channel::Sender<()>>,
-    ctx: T::Context,
+    ctx: std::sync::Arc<tokio::sync::RwLock<T::Context>>,
 }
 
 impl<T: SkedgyHandler> SkedgyScheduler<T> {
@@ -35,7 +36,8 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
             crons: Vec::new(),
             rx,
             terminate_rx,
-            ctx,
+            ctx: std::sync::Arc::new(tokio::sync::RwLock::new(ctx)),
+            last_cron_run: None,
         }
     }
 
@@ -112,11 +114,13 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
             })
             .collect();
         tokio::spawn(async move {
-            futures::future::join_all(
-                tasks
-                    .into_iter()
-                    .map(|(ctx, task)| async move { task.handler.handle(ctx).await }),
-            )
+            futures::future::join_all(tasks.into_iter().map(|(ctx, task)| {
+                let ctx = ctx.clone();
+                async move {
+                    let ctx = ctx.read().await;
+                    task.handler.handle(&ctx).await
+                }
+            }))
             .await;
         });
     }
@@ -173,12 +177,24 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
         }
     }
 
-    fn next_batch(&mut self) -> Vec<(DateTime<Utc>, SkedgyTask<T>)> {
-        let start = Utc::now();
-        let look_ahead_time = Utc::now() + self.config.look_ahead_duration;
+    fn next_batch(&mut self, from: DateTime<Utc>) -> Vec<(DateTime<Utc>, SkedgyTask<T>)> {
+        let look_ahead_time = from + self.config.look_ahead_duration;
+        let look_behind_time = from - Duration::milliseconds(1);
+
         let mut schedule_batch = self.query(look_ahead_time);
-        let cron_batch = self.query_crons(start, look_ahead_time);
-        schedule_batch.extend(cron_batch);
+
+        if self.last_cron_run.is_none() || {
+            let last_cron_run = self.last_cron_run.unwrap();
+            !(look_behind_time <= last_cron_run && last_cron_run <= look_ahead_time)
+        } {
+            let cron_batch = self.query_crons(look_behind_time, look_ahead_time);
+
+            if !cron_batch.is_empty() {
+                self.last_cron_run = Some(cron_batch.first().unwrap().0);
+            }
+            schedule_batch.extend(cron_batch);
+        }
+
         schedule_batch.sort_by_key(|(datetime, _)| *datetime);
         schedule_batch
     }
@@ -193,6 +209,13 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
             .crons
             .iter()
             .filter_map(|(schedule, _)| schedule.upcoming(Utc).next())
+            .filter(|time| {
+                if let Some(last_cron_run) = self.last_cron_run {
+                    time > &last_cron_run
+                } else {
+                    true
+                }
+            })
             .min();
 
         match (next_schedule, next_cron) {
@@ -224,9 +247,8 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
                     }
                 }
                 Some(next_schedule_time) => {
-                    let sleep_until = next_schedule_time - chrono::TimeDelta::milliseconds(10);
-                    let sleep_duration: Duration = if sleep_until > chrono::Utc::now() {
-                        sleep_until - chrono::Utc::now()
+                    let sleep_duration: Duration = if next_schedule_time > chrono::Utc::now() {
+                        next_schedule_time - chrono::Utc::now()
                     } else {
                         Duration::zero()
                     };
@@ -252,7 +274,7 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
                             }
                         }
                         _ = tokio::time::sleep(sleep_duration.to_std().unwrap_or_default()) => {
-                            let next_batch: Vec<(DateTime<Utc>, SkedgyTask<T>)> = self.next_batch();
+                            let next_batch: Vec<(DateTime<Utc>, SkedgyTask<T>)> = self.next_batch(next_schedule_time);
                             let next_tasks = next_batch.iter().map(|(_, task)| task.clone()).collect();
                             self.handle_schedules(next_tasks);
                         }

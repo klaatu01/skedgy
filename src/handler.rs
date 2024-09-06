@@ -4,5 +4,5 @@ use crate::context::SkedgyContext;
 /// Implement this trait for your task handler and define the task's behavior in the `handle` method.
 pub trait SkedgyHandler: Clone + Send + Sync + 'static {
     type Context: SkedgyContext + Send + Sync + 'static;
-    fn handle(&self, ctx: Self::Context) -> impl std::future::Future<Output = ()> + Send;
+    fn handle(&self, ctx: &Self::Context) -> impl std::future::Future<Output = ()> + Send;
 }
