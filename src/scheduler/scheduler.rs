@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use cron::Schedule;
 
 use crate::{
     command::SkedgyCommand,
     config::SkedgyConfig,
     error::SkedgyError,
-    handler::SkedgyHandler,
+    handler::{Metadata, SkedgyHandler},
     scheduler::{SkedgyState, TaskKind},
 };
 
@@ -17,7 +17,7 @@ pub(crate) struct SkedgyScheduler<T: SkedgyHandler> {
     config: SkedgyConfig,
     schedules: BTreeMap<DateTime<Utc>, Vec<SkedgyTask<T>>>,
     crons: Vec<(cron::Schedule, SkedgyTask<T>)>,
-    last_cron_run: Option<DateTime<Utc>>,
+    last_cron_run: DateTime<Utc>,
     rx: async_channel::Receiver<SkedgyCommand<T>>,
     terminate_rx: async_channel::Receiver<async_channel::Sender<()>>,
     ctx: std::sync::Arc<tokio::sync::RwLock<T::Context>>,
@@ -37,7 +37,7 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
             rx,
             terminate_rx,
             ctx: std::sync::Arc::new(tokio::sync::RwLock::new(ctx)),
-            last_cron_run: None,
+            last_cron_run: Utc::now().with_nanosecond(0).unwrap(),
         }
     }
 
@@ -105,20 +105,24 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
         }
     }
 
-    fn handle_schedules(&self, tasks: Vec<SkedgyTask<T>>) {
+    fn handle_schedules(&self, tasks: Vec<(DateTime<Utc>, SkedgyTask<T>)>) {
         let tasks: Vec<_> = tasks
             .into_iter()
-            .map(|task| {
+            .map(|(datetime, task)| {
                 let ctx = self.ctx.clone();
-                (ctx, task)
+                let metdata = Metadata {
+                    id: task.id.clone(),
+                    target_time: datetime,
+                };
+                (ctx, metdata, task)
             })
             .collect();
         tokio::spawn(async move {
-            futures::future::join_all(tasks.into_iter().map(|(ctx, task)| {
+            futures::future::join_all(tasks.into_iter().map(|(ctx, metdata, task)| {
                 let ctx = ctx.clone();
                 async move {
                     let ctx = ctx.read().await;
-                    task.handler.handle(&ctx).await
+                    task.handler.handle(&ctx, metdata).await
                 }
             }))
             .await;
@@ -183,16 +187,16 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
 
         let mut schedule_batch = self.query(look_ahead_time);
 
-        if self.last_cron_run.is_none() || {
-            let last_cron_run = self.last_cron_run.unwrap();
-            !(look_behind_time <= last_cron_run && last_cron_run <= look_ahead_time)
-        } {
-            let cron_batch = self.query_crons(look_behind_time, look_ahead_time);
+        let query_for_crons =
+            !(self.last_cron_run.gt(&look_behind_time) && self.last_cron_run.lt(&look_ahead_time));
 
+        if query_for_crons {
+            let cron_batch = self.query_crons(look_behind_time, look_ahead_time);
             if !cron_batch.is_empty() {
-                self.last_cron_run = Some(cron_batch.first().unwrap().0);
+                let next_cron_run = cron_batch.first().unwrap().0;
+                schedule_batch.extend(cron_batch);
+                self.last_cron_run = next_cron_run;
             }
-            schedule_batch.extend(cron_batch);
         }
 
         schedule_batch.sort_by_key(|(datetime, _)| *datetime);
@@ -209,13 +213,7 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
             .crons
             .iter()
             .filter_map(|(schedule, _)| schedule.upcoming(Utc).next())
-            .filter(|time| {
-                if let Some(last_cron_run) = self.last_cron_run {
-                    time > &last_cron_run
-                } else {
-                    true
-                }
-            })
+            .filter(|time| time > &self.last_cron_run)
             .min();
 
         match (next_schedule, next_cron) {
@@ -227,6 +225,7 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), SkedgyError> {
+        log::info!("{}", self.last_cron_run);
         loop {
             log::debug!("Scheduler tick");
             let next_schedule_time = self.next_schedule_time();
@@ -275,8 +274,7 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
                         }
                         _ = tokio::time::sleep(sleep_duration.to_std().unwrap_or_default()) => {
                             let next_batch: Vec<(DateTime<Utc>, SkedgyTask<T>)> = self.next_batch(next_schedule_time);
-                            let next_tasks = next_batch.iter().map(|(_, task)| task.clone()).collect();
-                            self.handle_schedules(next_tasks);
+                            self.handle_schedules(next_batch);
                         }
                     }
                 }

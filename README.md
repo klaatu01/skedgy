@@ -22,13 +22,18 @@ cargo add skedgy
 Implement the `SkedgyHandler` trait for your task. This trait requires the `handle` method, which is an asynchronous function that defines the task's behavior.
 
 ```rust
-use skedgy::SkedgyHandler;
+use skedgy::{SkedgyHandler, Metadata};
+
+
+struct MyContext {
+    // Add any context data here
+}
 
 #[derive(Clone)]
 struct MyTask;
 
 impl SkedgyHandler for MyTask {
-    async fn handle(&self) {
+    async fn handle(&self, context: &MyContext, _: Metadata) {
         println!("Task is running!");
     }
 }
@@ -42,10 +47,12 @@ Initialize a scheduler with a tick interval:
 use skedgy::{Skedgy, SkedgyConfig};
 use std::time::Duration;
 
-let config = SkedgyConfig {
-    tick_interval: Duration::from_millis(100),
-};
-let mut scheduler = Skedgy::new(config).expect("Failed to create scheduler");
+let skedgy = Skedgy::new(
+    SkedgyConfig {
+        look_ahead_duration: Duration::from_millis(50),
+    },
+    MyContext {}
+);
 ```
 
 ### 3. Schedule Tasks
@@ -53,16 +60,14 @@ let mut scheduler = Skedgy::new(config).expect("Failed to create scheduler");
 You can schedule tasks to run at specific times, after a delay, or using cron expressions.
 
 ```rust
-use chrono::Utc;
+let task =
+    SkedgyTask::anonymous()
+        .r#in(Duration::from_secs(5)
+        .handler(MyTask)
+        .build()
+        .expect("Failed to build task");
 
-// Schedule a task to run at a specific time
-scheduler.run_at(Utc::now() + chrono::Duration::seconds(10), MyTask).await.expect("Failed to schedule task");
-
-// Schedule a task to run after a delay
-scheduler.run_in(Duration::from_secs(5), MyTask).await.expect("Failed to schedule task");
-
-// Schedule a task using a cron expression
-scheduler.cron("0/1 * * * * * *", MyTask).await.expect("Failed to schedule cron task");
+skedgy.schedule(task).await.expect("Failed to schedule task");
 ```
 
 ### 4. Run the Scheduler

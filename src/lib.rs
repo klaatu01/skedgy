@@ -34,11 +34,13 @@ mod utils;
 pub use config::SkedgyConfig;
 pub use context::SkedgyContext;
 pub use error::SkedgyError;
-pub use handler::SkedgyHandler;
+pub use handler::{Metadata, SkedgyHandler};
 pub use scheduler::{Skedgy, SkedgyTask, SkedgyTaskBuilder};
 
 #[cfg(test)]
 mod tests {
+    use self::handler::Metadata;
+
     use super::*;
     use crate::{SkedgyHandler, SkedgyTaskBuilder};
     use chrono::Utc;
@@ -63,7 +65,7 @@ mod tests {
 
     impl SkedgyHandler for MockHandler {
         type Context = MockContext;
-        async fn handle(&self, _ctx: &Self::Context) {
+        async fn handle(&self, _ctx: &Self::Context, _metadata: Metadata) {
             let mut count = self.counter.lock().await;
             *count += 1;
             if let Some(tx) = &self.done_tx {
