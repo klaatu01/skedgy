@@ -10,6 +10,7 @@ Skedgy is a lightweight, asynchronous task scheduler for Rust. It allows you to 
 - 📦 De/Serializable state using `serde`.
 - 📏 Precision of ~10ms, but this is configurable.
 - 🔥 Optimized scheduling algorithm.
+- 🪵 Debug logging using `log`.
 
 ## Installation
 
