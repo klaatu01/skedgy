@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use cron::Schedule;
 
 use crate::{
     command::SkedgyCommand,
     config::SkedgyConfig,
     error::SkedgyError,
-    handler::SkedgyHandler,
+    handler::{Metadata, SkedgyHandler},
     scheduler::{SkedgyState, TaskKind},
 };
 
@@ -17,9 +17,10 @@ pub(crate) struct SkedgyScheduler<T: SkedgyHandler> {
     config: SkedgyConfig,
     schedules: BTreeMap<DateTime<Utc>, Vec<SkedgyTask<T>>>,
     crons: Vec<(cron::Schedule, SkedgyTask<T>)>,
+    last_cron_run: DateTime<Utc>,
     rx: async_channel::Receiver<SkedgyCommand<T>>,
     terminate_rx: async_channel::Receiver<async_channel::Sender<()>>,
-    ctx: T::Context,
+    ctx: std::sync::Arc<tokio::sync::RwLock<T::Context>>,
 }
 
 impl<T: SkedgyHandler> SkedgyScheduler<T> {
@@ -35,7 +36,8 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
             crons: Vec::new(),
             rx,
             terminate_rx,
-            ctx,
+            ctx: std::sync::Arc::new(tokio::sync::RwLock::new(ctx)),
+            last_cron_run: Utc::now().with_nanosecond(0).unwrap(),
         }
     }
 
@@ -51,19 +53,22 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
         self.crons.retain(|(_, task)| task.id != id);
     }
 
-    fn query(&mut self, end: DateTime<Utc>) -> Vec<SkedgyTask<T>> {
+    fn query(&mut self, end: DateTime<Utc>) -> Vec<(DateTime<Utc>, SkedgyTask<T>)> {
         let after = self.schedules.split_off(&end);
         let before = self
             .schedules
             .iter()
-            .flat_map(|(_, v)| v)
-            .cloned()
+            .flat_map(|(datetime, v)| v.iter().map(move |task| (*datetime, task.clone())))
             .collect();
         self.schedules = after;
         before
     }
 
-    fn query_crons(&mut self, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<SkedgyTask<T>> {
+    fn query_crons(
+        &mut self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Vec<(DateTime<Utc>, SkedgyTask<T>)> {
         self.crons
             .iter()
             .filter_map(|(schedule, task)| {
@@ -74,9 +79,13 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
                 if runs.is_empty() {
                     None
                 } else {
-                    Some(task.clone())
+                    Some(
+                        runs.into_iter()
+                            .map(move |run_time| (run_time, task.clone())),
+                    )
                 }
             })
+            .flatten()
             .collect()
     }
 
@@ -96,20 +105,26 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
         }
     }
 
-    fn handle_schedules(&self, tasks: Vec<SkedgyTask<T>>) {
+    fn handle_schedules(&self, tasks: Vec<(DateTime<Utc>, SkedgyTask<T>)>) {
         let tasks: Vec<_> = tasks
             .into_iter()
-            .map(|task| {
+            .map(|(datetime, task)| {
                 let ctx = self.ctx.clone();
-                (ctx, task)
+                let metdata = Metadata {
+                    id: task.id.clone(),
+                    target_time: datetime,
+                };
+                (ctx, metdata, task)
             })
             .collect();
         tokio::spawn(async move {
-            futures::future::join_all(
-                tasks
-                    .into_iter()
-                    .map(|(ctx, task)| async move { task.handler.handle(ctx).await }),
-            )
+            futures::future::join_all(tasks.into_iter().map(|(ctx, metdata, task)| {
+                let ctx = ctx.clone();
+                async move {
+                    let ctx = ctx.read().await;
+                    task.handler.handle(&ctx, metdata).await
+                }
+            }))
             .await;
         });
     }
@@ -166,48 +181,104 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
         }
     }
 
+    fn next_batch(&mut self, from: DateTime<Utc>) -> Vec<(DateTime<Utc>, SkedgyTask<T>)> {
+        let look_ahead_time = from + self.config.look_ahead_duration;
+        let look_behind_time = from - Duration::milliseconds(1);
+
+        let mut schedule_batch = self.query(look_ahead_time);
+
+        let query_for_crons =
+            !(self.last_cron_run.gt(&look_behind_time) && self.last_cron_run.lt(&look_ahead_time));
+
+        if query_for_crons {
+            let cron_batch = self.query_crons(look_behind_time, look_ahead_time);
+            if !cron_batch.is_empty() {
+                let next_cron_run = cron_batch.first().unwrap().0;
+                schedule_batch.extend(cron_batch);
+                self.last_cron_run = next_cron_run;
+            }
+        }
+
+        schedule_batch.sort_by_key(|(datetime, _)| *datetime);
+        schedule_batch
+    }
+
+    pub fn next_schedule_time(&self) -> Option<DateTime<Utc>> {
+        let next_schedule = self
+            .schedules
+            .first_key_value()
+            .map(|(datetime, _)| *datetime);
+
+        let next_cron = self
+            .crons
+            .iter()
+            .filter_map(|(schedule, _)| schedule.upcoming(Utc).next())
+            .filter(|time| time > &self.last_cron_run)
+            .min();
+
+        match (next_schedule, next_cron) {
+            (Some(schedule), Some(cron)) => Some(schedule.min(cron)),
+            (Some(schedule), None) => Some(schedule),
+            (None, Some(cron)) => Some(cron),
+            (None, None) => None,
+        }
+    }
+
     pub(crate) async fn run(&mut self) -> Result<(), SkedgyError> {
-        let mut last_tick_start = chrono::Utc::now();
+        log::info!("{}", self.last_cron_run);
         loop {
-            if let Ok(tx) = self.terminate_rx.try_recv() {
-                let _ = tx.send(()).await;
-                log::info!("Terminating scheduler");
-                return Ok(());
-            }
-
             log::debug!("Scheduler tick");
-            let tick_start = chrono::Utc::now();
+            let next_schedule_time = self.next_schedule_time();
+            match next_schedule_time {
+                None => {
+                    log::debug!("No schedules, hybernating.");
+                    tokio::select! {
+                        _ = self.terminate_rx.recv() => {
+                            log::debug!("Terminating scheduler");
+                            return Ok(());
+                        }
+                        next_command = self.rx.recv() => {
+                            if let Ok(command) = next_command {
+                                self.handle_command(command).await;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                Some(next_schedule_time) => {
+                    let sleep_duration: Duration = if next_schedule_time > chrono::Utc::now() {
+                        next_schedule_time - chrono::Utc::now()
+                    } else {
+                        Duration::zero()
+                    };
 
-            let commands = self.drain_channel().await?;
-            log::debug!("Received {} commands", commands.len());
-            self.handle_commands(commands).await;
+                    log::debug!(
+                        "Sleeping for {}",
+                        humantime::format_duration(sleep_duration.to_std().unwrap_or_default())
+                    );
 
-            let tasks = self.query(tick_start);
-            log::debug!("Running {} tasks", tasks.len());
-            self.handle_schedules(tasks);
-
-            let crons = self.query_crons(last_tick_start, tick_start);
-            log::debug!("Running {} cron tasks", crons.len());
-            self.handle_schedules(crons);
-
-            let tick_end = chrono::Utc::now();
-            let tick_duration = tick_end
-                .signed_duration_since(tick_start)
-                .to_std()
-                .map_err(|_| SkedgyError::TickError)?;
-
-            if tick_duration < self.config.tick_interval {
-                log::debug!(
-                    "Sleeping for {:?}",
-                    self.config.tick_interval - tick_duration
-                );
-                tokio::time::sleep(self.config.tick_interval - tick_duration).await;
-            } else {
-                log::warn!("Scheduler tick took longer than the tick interval");
+                    tokio::select! {
+                        _ = self.terminate_rx.recv() => {
+                            log::debug!("Terminating scheduler");
+                            return Ok(());
+                        }
+                        next_command = self.rx.recv() => {
+                            if let Ok(command) = next_command {
+                                log::debug!("Hybernation interrupted by command");
+                                let mut commands = self.drain_channel().await?;
+                                commands.push(command);
+                                log::debug!("Received {} commands", commands.len());
+                                self.handle_commands(commands).await;
+                                continue;
+                            }
+                        }
+                        _ = tokio::time::sleep(sleep_duration.to_std().unwrap_or_default()) => {
+                            let next_batch: Vec<(DateTime<Utc>, SkedgyTask<T>)> = self.next_batch(next_schedule_time);
+                            self.handle_schedules(next_batch);
+                        }
+                    }
+                }
             }
-
-            last_tick_start = tick_start;
-            log::debug!("Scheduler tick took {:?}", tick_duration);
         }
     }
 }

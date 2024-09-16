@@ -3,10 +3,10 @@ use crate::handler::SkedgyHandler;
 
 use chrono::{DateTime, Utc};
 use cron::Schedule;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone)]
 pub struct SkedgyState<T: SkedgyHandler> {
     tasks: Vec<SkedgyTask<T>>,
 }

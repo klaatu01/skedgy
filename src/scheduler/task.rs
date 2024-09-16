@@ -3,32 +3,35 @@ use std::{str::FromStr, time::Duration};
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use nanoid::nanoid;
-use serde::{Deserialize, Serialize};
 
-use crate::{
-    error::SkedgyError,
-    handler::SkedgyHandler,
-    utils::{deserialize_datetime, deserialize_schedule, serialize_datetime, serialize_schedule},
-};
+use crate::{error::SkedgyError, handler::SkedgyHandler};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone)]
 pub enum TaskKind {
-    #[serde(
-        serialize_with = "serialize_datetime",
-        deserialize_with = "deserialize_datetime"
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            serialize_with = "crate::utils::serialize_datetime",
+            deserialize_with = "crate::utils::deserialize_datetime"
+        )
     )]
     At(DateTime<Utc>),
 
     In(Duration),
 
-    #[serde(
-        serialize_with = "serialize_schedule",
-        deserialize_with = "deserialize_schedule"
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            serialize_with = "crate::utils::serialize_schedule",
+            deserialize_with = "crate::utils::deserialize_schedule"
+        )
     )]
     Cron(Schedule),
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone)]
 pub struct SkedgyTask<T: SkedgyHandler> {
     pub(crate) id: String,
     pub(crate) kind: TaskKind,

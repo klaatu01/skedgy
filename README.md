@@ -1,13 +1,16 @@
 # Skedgy - Asynchronous Task Scheduler
 
-Skedgy is a lightweight, asynchronous task scheduler written in Rust. It allows you to schedule tasks to run at specific times, after certain delays, or based on cron expressions. Skedgy is built using `tokio` for asynchronous execution and is designed to be efficient and easy to use.
+Skedgy is a lightweight, asynchronous task scheduler for Rust. It allows you to schedule tasks to run at specific times, either using a `DateTime` or a `Duration`. You can also schedule tasks to repeat at specific intervals using cron expressions.
 
 ## Features
 
-- **Run tasks at a specific time**: Schedule tasks to run at any `DateTime<Utc>`.
-- **Run tasks after a delay**: Schedule tasks to run after a specified `Duration`.
-- **Cron scheduling**: Schedule tasks using cron expressions for recurring tasks.
-- **Error handling**: Comprehensive error handling to catch and log issues during scheduling or execution.
+- ⌚️ Schedule tasks to run at specific times, either using a `DateTime` or a `Duration`.
+- ♻️ Schdule tasks using cron expressions to repeat at specific intervals.
+- 🚀 Asynchronous execution using `tokio`.
+- 📦 De/Serializable state using `serde`.
+- 📏 Precision of ~10ms, but this is configurable.
+- 🔥 Optimized scheduling algorithm.
+- 🪵 Debug logging using `log`.
 
 ## Installation
 
@@ -15,59 +18,71 @@ Skedgy is a lightweight, asynchronous task scheduler written in Rust. It allows 
 cargo add skedgy
 ```
 
+or add the following to your `Cargo.toml`:
+
+```toml
+[dependencies]
+skedgy = "0.0.2"
+```
+
 ## Usage
 
-### 1. Define Your Task Handler
-
-Implement the `SkedgyHandler` trait for your task. This trait requires the `handle` method, which is an asynchronous function that defines the task's behavior.
-
 ```rust
-use skedgy::SkedgyHandler;
+use skedgy::{Skedgy, SkedgyHandler, Metadata};
+use std::error::Error;
 
-#[derive(Clone)]
-struct MyTask;
+// Define a custom context to store state
+#[derive(Debug, Clone)]
+struct CustomContext {
+    count: AtomicUsize
+}
 
-impl SkedgyHandler for MyTask {
-    async fn handle(&self) {
-        println!("Task is running!");
+impl CustomContext {
+    fn add(&self, amount: usize) {
+        self.count.fetch_add(amount, Ordering::Relaxed);
+        println!("Count: {}", self.count.load(Ordering::Relaxed));
+    }
+
+}
+
+// Define a task to increment the count in the custom context
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Task {
+    amount: usize
+}
+
+// Implement the SkedgyHandler trait for the task
+impl SkedgyHandler for Task {
+    type Context = CustomContext;
+    async fn handle(&self, ctx: Self::Context, _: Metadata) {
+        ctx.add(self.amount);
     }
 }
+
+#[tokio::main]
+async fn main() -> Result<(), Box<Error>> {
+    // Create a new Skedgy instance with a custom context
+    let skedgy = Skedgy::new(
+        SkedgyConfig {
+            look_ahead_duration: Duration::from_millis(10),
+        },
+        CustomContext {
+            count: AtomicUsize::new(0)
+        }
+    );
+
+    // Schedule a task to run in 1 second
+    let task = SkedgyTask::anonymous()
+        .r#in(Duration::from_secs(1))
+        .handler(Task { amount: 1 })
+        .build()?;
+    skegdy.schedule(task).await?;
+
+    // Sleep for 2 seconds to allow the task to run
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    Ok(())
+}
 ```
-
-### 2. Create a Scheduler
-
-Initialize a scheduler with a tick interval:
-
-```rust
-use skedgy::{Skedgy, SkedgyConfig};
-use std::time::Duration;
-
-let config = SkedgyConfig {
-    tick_interval: Duration::from_millis(100),
-};
-let mut scheduler = Skedgy::new(config).expect("Failed to create scheduler");
-```
-
-### 3. Schedule Tasks
-
-You can schedule tasks to run at specific times, after a delay, or using cron expressions.
-
-```rust
-use chrono::Utc;
-
-// Schedule a task to run at a specific time
-scheduler.run_at(Utc::now() + chrono::Duration::seconds(10), MyTask).await.expect("Failed to schedule task");
-
-// Schedule a task to run after a delay
-scheduler.run_in(Duration::from_secs(5), MyTask).await.expect("Failed to schedule task");
-
-// Schedule a task using a cron expression
-scheduler.cron("0/1 * * * * * *", MyTask).await.expect("Failed to schedule cron task");
-```
-
-### 4. Run the Scheduler
-
-The scheduler is automatically run when it is created and will continue to process tasks until the program ends.
 
 ## Contributing
 

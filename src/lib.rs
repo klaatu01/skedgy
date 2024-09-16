@@ -34,11 +34,13 @@ mod utils;
 pub use config::SkedgyConfig;
 pub use context::SkedgyContext;
 pub use error::SkedgyError;
-pub use handler::SkedgyHandler;
+pub use handler::{Metadata, SkedgyHandler};
 pub use scheduler::{Skedgy, SkedgyTask, SkedgyTaskBuilder};
 
 #[cfg(test)]
 mod tests {
+    use self::handler::Metadata;
+
     use super::*;
     use crate::{SkedgyHandler, SkedgyTaskBuilder};
     use chrono::Utc;
@@ -63,7 +65,7 @@ mod tests {
 
     impl SkedgyHandler for MockHandler {
         type Context = MockContext;
-        async fn handle(&self, _ctx: Self::Context) {
+        async fn handle(&self, _ctx: &Self::Context, _metadata: Metadata) {
             let mut count = self.counter.lock().await;
             *count += 1;
             if let Some(tx) = &self.done_tx {
@@ -73,7 +75,9 @@ mod tests {
     }
 
     fn create_scheduler<T: SkedgyHandler>(tick_interval: Duration, ctx: T::Context) -> Skedgy<T> {
-        let config = SkedgyConfig { tick_interval };
+        let config = SkedgyConfig {
+            look_ahead_duration: tick_interval,
+        };
         Skedgy::new(config, ctx)
     }
 
@@ -255,10 +259,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_cron_task() {
+        env_logger::init();
         let counter = Arc::new(Mutex::new(0));
         let handler = MockHandler::new(counter.clone(), None);
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
+        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(10), MockContext {});
+
         let task = SkedgyTaskBuilder::named("cron_task")
             .cron("0/1 * * * * * *")
             .expect("Failed to build cron task")
