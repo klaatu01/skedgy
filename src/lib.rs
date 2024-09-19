@@ -60,6 +60,29 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct MockHandler2 {
+        counter: Arc<Mutex<i32>>,
+        done_tx: Option<async_channel::Sender<()>>,
+    }
+
+    impl MockHandler2 {
+        fn new(counter: Arc<Mutex<i32>>, done_tx: Option<async_channel::Sender<()>>) -> Self {
+            MockHandler2 { counter, done_tx }
+        }
+    }
+
+    impl SkedgyHandler for MockHandler2 {
+        type Context = MockContext;
+        async fn handle(&self, _ctx: &Self::Context, _metadata: Metadata) {
+            let mut count = self.counter.lock().await;
+            *count += 1;
+            if let Some(tx) = &self.done_tx {
+                tx.send(()).await.expect("Failed to send done signal");
+            }
+        }
+    }
+
+    #[derive(Clone)]
     struct MockContext {}
 
     impl SkedgyHandler for MockHandler {
@@ -286,5 +309,41 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1100)).await;
 
         assert_eq!(*counter.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_task_types() {
+        let counter = Arc::new(Mutex::new(0));
+        let (tx1, rx1) = async_channel::bounded(1);
+        let handler1 = MockHandler::new(counter.clone(), Some(tx1));
+
+        let (tx2, rx2) = async_channel::bounded(1);
+        let handler2 = MockHandler2::new(counter.clone(), Some(tx2));
+
+        let scheduler = create_scheduler(Duration::from_millis(10), MockContext {});
+
+        let task1 = SkedgyTaskBuilder::named("cron_task1")
+            .cron("0/1 * * * * * *")
+            .expect("Failed to build cron task")
+            .handler(handler1)
+            .build()
+            .expect("Failed to build task");
+
+        let task2 = SkedgyTaskBuilder::named("cron_task2")
+            .cron("0/2 * * * * * *")
+            .expect("Failed to build cron task")
+            .handler(handler2)
+            .build()
+            .expect("Failed to build task");
+
+        scheduler
+            .schedule(task1)
+            .await
+            .expect("Failed to schedule cron task");
+
+        scheduler
+            .schedule(task2)
+            .await
+            .expect("Failed to schedule cron task");
     }
 }
