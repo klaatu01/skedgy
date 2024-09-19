@@ -27,16 +27,11 @@ where
     Self: Send,
 {
     fn handle_dyn(self: Box<Self>, ctx: &Ctx, metadata: Metadata) -> BoxFuture<'_, ()>;
-    fn as_any(self: Box<Self>) -> Box<dyn std::any::Any>;
 }
 
 impl<Ctx: SkedgyContext, T: SkedgyHandler<Context = Ctx>> DynHandler<Ctx> for T {
     fn handle_dyn(self: Box<Self>, ctx: &Ctx, metadata: Metadata) -> BoxFuture<'_, ()> {
         async move { SkedgyHandler::handle(&*self, ctx, metadata).await }.boxed()
-    }
-
-    fn as_any(self: Box<Self>) -> Box<dyn std::any::Any> {
-        self
     }
 }
 

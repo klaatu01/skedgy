@@ -112,7 +112,7 @@ mod tests {
         let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
         let run_at = Utc::now() + Duration::from_millis(200);
         let task = SkedgyTaskBuilder::named("test_task")
-            .at(run_at)
+            .at_datetime(run_at)
             .handler(handler)
             .build()
             .expect("Failed to build task");
@@ -134,7 +134,7 @@ mod tests {
 
         let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
         let task = SkedgyTaskBuilder::named("test_task")
-            .r#in(Duration::from_millis(200))
+            .in_duration(Duration::from_millis(200))
             .handler(handler)
             .build()
             .expect("Failed to build task");
@@ -155,7 +155,7 @@ mod tests {
 
         let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
         let task = SkedgyTaskBuilder::named("test_task")
-            .cron("0/1 * * * * * *")
+            .on_cron("0/1 * * * * * *")
             .expect("Failed to build task")
             .handler(handler)
             .build()
@@ -183,13 +183,13 @@ mod tests {
 
         let run_at = Utc::now() + Duration::from_millis(200);
         let task1 = SkedgyTaskBuilder::named("task1")
-            .at(run_at)
+            .at_datetime(run_at)
             .handler(handler1)
             .build()
             .expect("Failed to build task");
 
         let task2 = SkedgyTaskBuilder::named("task2")
-            .r#in(Duration::from_millis(400))
+            .in_duration(Duration::from_millis(400))
             .handler(handler2)
             .build()
             .expect("Failed to build task");
@@ -223,7 +223,7 @@ mod tests {
         let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
         let run_at = Utc::now() + Duration::from_millis(200);
         let task = SkedgyTaskBuilder::named("remove_task")
-            .at(run_at)
+            .at_datetime(run_at)
             .handler(handler)
             .build()
             .expect("Failed to build task");
@@ -252,7 +252,7 @@ mod tests {
         let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
         let run_at = Utc::now() + Duration::from_millis(500);
         let original_task = SkedgyTaskBuilder::named("update_task")
-            .at(run_at)
+            .at_datetime(run_at)
             .handler(handler.clone())
             .build()
             .expect("Failed to build task");
@@ -264,7 +264,7 @@ mod tests {
 
         let updated_run_at = Utc::now() + Duration::from_millis(200);
         let updated_task = SkedgyTaskBuilder::named("update_task")
-            .at(updated_run_at)
+            .at_datetime(updated_run_at)
             .handler(handler)
             .build()
             .expect("Failed to build updated task");
@@ -288,7 +288,7 @@ mod tests {
         let scheduler = create_scheduler(Duration::from_millis(10), MockContext {});
 
         let task = SkedgyTaskBuilder::named("cron_task")
-            .cron("0/1 * * * * * *")
+            .on_cron("0/1 * * * * * *")
             .expect("Failed to build cron task")
             .handler(handler)
             .build()
@@ -323,14 +323,14 @@ mod tests {
         let scheduler = create_scheduler(Duration::from_millis(10), MockContext {});
 
         let task1 = SkedgyTaskBuilder::named("cron_task1")
-            .cron("0/1 * * * * * *")
+            .on_cron("0/1 * * * * * *")
             .expect("Failed to build cron task")
             .handler(handler1)
             .build()
             .expect("Failed to build task");
 
         let task2 = SkedgyTaskBuilder::named("cron_task2")
-            .cron("0/2 * * * * * *")
+            .on_cron("0/2 * * * * * *")
             .expect("Failed to build cron task")
             .handler(handler2)
             .build()

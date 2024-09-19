@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, time::Duration};
 
 use chrono::{DateTime, Utc};
 use cron::Schedule;
@@ -86,18 +86,18 @@ impl<Ctx: SkedgyContext, T: SkedgyHandler<Context = Ctx>> SkedgyTaskBuilder<Ctx,
         }
     }
 
-    pub fn at(&mut self, datetime: DateTime<Utc>) -> &mut Self {
+    pub fn at_datetime(&mut self, datetime: DateTime<Utc>) -> &mut Self {
         self.kind = Some(TaskKind::At(datetime));
         self
     }
 
-    pub fn r#in(&mut self, duration: Duration) -> &mut Self {
+    pub fn in_duration(&mut self, duration: Duration) -> &mut Self {
         let datetime = Utc::now() + duration;
         self.kind = Some(TaskKind::At(datetime));
         self
     }
 
-    pub fn cron(&mut self, pattern: &str) -> Result<&mut Self, SkedgyError> {
+    pub fn on_cron(&mut self, pattern: &str) -> Result<&mut Self, SkedgyError> {
         let schedule = cron::Schedule::from_str(pattern).map_err(|_| SkedgyError::InvalidCron)?;
         self.kind = Some(TaskKind::Cron(schedule));
         Ok(self)
