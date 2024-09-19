@@ -4,31 +4,28 @@ use chrono::{DateTime, Duration, Timelike, Utc};
 use cron::Schedule;
 
 use crate::{
-    command::SkedgyCommand,
-    config::SkedgyConfig,
-    error::SkedgyError,
-    handler::{Metadata, SkedgyHandler},
-    scheduler::{SkedgyState, TaskKind},
+    command::SkedgyCommand, config::SkedgyConfig, error::SkedgyError, handler::Metadata,
+    scheduler::TaskKind, SkedgyContext,
 };
 
-use super::task::SkedgyTask;
+use super::task::DynSkedgyTask;
 
-pub(crate) struct SkedgyScheduler<T: SkedgyHandler> {
+pub(crate) struct SkedgyScheduler<Ctx: SkedgyContext> {
     config: SkedgyConfig,
-    schedules: BTreeMap<DateTime<Utc>, Vec<SkedgyTask<T>>>,
-    crons: Vec<(cron::Schedule, SkedgyTask<T>)>,
+    schedules: BTreeMap<DateTime<Utc>, Vec<DynSkedgyTask<Ctx>>>,
+    crons: Vec<(cron::Schedule, DynSkedgyTask<Ctx>)>,
     last_cron_run: DateTime<Utc>,
-    rx: async_channel::Receiver<SkedgyCommand<T>>,
+    rx: async_channel::Receiver<SkedgyCommand<Ctx>>,
     terminate_rx: async_channel::Receiver<async_channel::Sender<()>>,
-    ctx: std::sync::Arc<tokio::sync::RwLock<T::Context>>,
+    ctx: std::sync::Arc<tokio::sync::RwLock<Ctx>>,
 }
 
-impl<T: SkedgyHandler> SkedgyScheduler<T> {
+impl<Ctx: SkedgyContext> SkedgyScheduler<Ctx> {
     pub(crate) fn new(
         config: SkedgyConfig,
-        rx: async_channel::Receiver<SkedgyCommand<T>>,
+        rx: async_channel::Receiver<SkedgyCommand<Ctx>>,
         terminate_rx: async_channel::Receiver<async_channel::Sender<()>>,
-        ctx: T::Context,
+        ctx: Ctx,
     ) -> Self {
         Self {
             config,
@@ -41,11 +38,11 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
         }
     }
 
-    fn insert(&mut self, datetime: DateTime<Utc>, task: SkedgyTask<T>) {
+    fn insert(&mut self, datetime: DateTime<Utc>, task: DynSkedgyTask<Ctx>) {
         self.schedules.entry(datetime).or_default().push(task);
     }
 
-    fn insert_cron(&mut self, schedule: Schedule, task: SkedgyTask<T>) {
+    fn insert_cron(&mut self, schedule: Schedule, task: DynSkedgyTask<Ctx>) {
         self.crons.push((schedule, task));
     }
 
@@ -53,12 +50,17 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
         self.crons.retain(|(_, task)| task.id != id);
     }
 
-    fn query(&mut self, end: DateTime<Utc>) -> Vec<(DateTime<Utc>, SkedgyTask<T>)> {
+    fn query(&mut self, end: DateTime<Utc>) -> Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)> {
         let after = self.schedules.split_off(&end);
         let before = self
             .schedules
             .iter()
-            .flat_map(|(datetime, v)| v.iter().map(move |task| (*datetime, task.clone())))
+            .flat_map(|(datetime, tasks)| {
+                tasks
+                    .iter()
+                    .map(move |task| (*datetime, task.clone()))
+                    .collect::<Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)>>()
+            })
             .collect();
         self.schedules = after;
         before
@@ -68,7 +70,7 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
         &mut self,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
-    ) -> Vec<(DateTime<Utc>, SkedgyTask<T>)> {
+    ) -> Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)> {
         self.crons
             .iter()
             .filter_map(|(schedule, task)| {
@@ -89,7 +91,7 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
             .collect()
     }
 
-    async fn drain_channel(&mut self) -> Result<Vec<SkedgyCommand<T>>, SkedgyError> {
+    async fn drain_channel(&mut self) -> Result<Vec<SkedgyCommand<Ctx>>, SkedgyError> {
         let mut commands = Vec::new();
         loop {
             match self.rx.try_recv() {
@@ -105,7 +107,7 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
         }
     }
 
-    fn handle_schedules(&self, tasks: Vec<(DateTime<Utc>, SkedgyTask<T>)>) {
+    fn handle_schedules(&self, tasks: Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)>) {
         let tasks: Vec<_> = tasks
             .into_iter()
             .map(|(datetime, task)| {
@@ -122,29 +124,20 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
                 let ctx = ctx.clone();
                 async move {
                     let ctx = ctx.read().await;
-                    task.handler.handle(&ctx, metdata).await
+                    task.execute(&*ctx, metdata).await;
                 }
             }))
             .await;
         });
     }
 
-    async fn handle_commands(&mut self, commands: Vec<SkedgyCommand<T>>) {
+    async fn handle_commands(&mut self, commands: Vec<SkedgyCommand<Ctx>>) {
         for command in commands {
             self.handle_command(command).await;
         }
     }
 
-    fn state(&mut self) -> SkedgyState<T> {
-        SkedgyState::new(self.crons.clone(), self.schedules.clone())
-    }
-
-    fn load(&mut self, state: SkedgyState<T>) {
-        self.crons = state.crons();
-        self.schedules = state.schedules();
-    }
-
-    async fn handle_command(&mut self, command: SkedgyCommand<T>) {
+    async fn handle_command(&mut self, command: SkedgyCommand<Ctx>) {
         match command {
             SkedgyCommand::Add(task) => match task.kind {
                 TaskKind::At(datetime) => self.insert(datetime, task),
@@ -171,17 +164,10 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
                     self.insert_cron(schedule.clone(), task);
                 }
             },
-            SkedgyCommand::GetState(tx) => {
-                let state = self.state();
-                let _ = tx.send(state).await;
-            }
-            SkedgyCommand::LoadState(state) => {
-                self.load(state);
-            }
         }
     }
 
-    fn next_batch(&mut self, from: DateTime<Utc>) -> Vec<(DateTime<Utc>, SkedgyTask<T>)> {
+    fn next_batch(&mut self, from: DateTime<Utc>) -> Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)> {
         let look_ahead_time = from + self.config.look_ahead_duration;
         let look_behind_time = from - Duration::milliseconds(1);
 
@@ -273,7 +259,7 @@ impl<T: SkedgyHandler> SkedgyScheduler<T> {
                             }
                         }
                         _ = tokio::time::sleep(sleep_duration.to_std().unwrap_or_default()) => {
-                            let next_batch: Vec<(DateTime<Utc>, SkedgyTask<T>)> = self.next_batch(next_schedule_time);
+                            let next_batch: Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)> = self.next_batch(next_schedule_time);
                             self.handle_schedules(next_batch);
                         }
                     }

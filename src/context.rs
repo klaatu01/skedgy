@@ -1,3 +1,3 @@
-pub trait SkedgyContext: Clone {}
+pub trait SkedgyContext: Clone + Send + Sync + 'static {}
 
-impl<T: Clone> SkedgyContext for T {}
+impl<T: Clone + Send + Sync + 'static> SkedgyContext for T {}

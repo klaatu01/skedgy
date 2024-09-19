@@ -29,7 +29,6 @@ mod context;
 mod error;
 mod handler;
 mod scheduler;
-mod utils;
 
 pub use config::SkedgyConfig;
 pub use context::SkedgyContext;
@@ -74,7 +73,7 @@ mod tests {
         }
     }
 
-    fn create_scheduler<T: SkedgyHandler>(tick_interval: Duration, ctx: T::Context) -> Skedgy<T> {
+    fn create_scheduler<Ctx: SkedgyContext>(tick_interval: Duration, ctx: Ctx) -> Skedgy<Ctx> {
         let config = SkedgyConfig {
             look_ahead_duration: tick_interval,
         };
@@ -87,7 +86,7 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
+        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
         let run_at = Utc::now() + Duration::from_millis(200);
         let task = SkedgyTaskBuilder::named("test_task")
             .at(run_at)
@@ -110,7 +109,7 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
+        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
         let task = SkedgyTaskBuilder::named("test_task")
             .r#in(Duration::from_millis(200))
             .handler(handler)
@@ -131,7 +130,7 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
+        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
         let task = SkedgyTaskBuilder::named("test_task")
             .cron("0/1 * * * * * *")
             .expect("Failed to build task")
@@ -157,7 +156,7 @@ mod tests {
         let (tx2, rx2) = async_channel::bounded(1);
         let handler2 = MockHandler::new(counter.clone(), Some(tx2));
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
+        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
 
         let run_at = Utc::now() + Duration::from_millis(200);
         let task1 = SkedgyTaskBuilder::named("task1")
@@ -198,7 +197,7 @@ mod tests {
         let counter = Arc::new(Mutex::new(0));
         let handler = MockHandler::new(counter.clone(), None);
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
+        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
         let run_at = Utc::now() + Duration::from_millis(200);
         let task = SkedgyTaskBuilder::named("remove_task")
             .at(run_at)
@@ -227,7 +226,7 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(100), MockContext {});
+        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
         let run_at = Utc::now() + Duration::from_millis(500);
         let original_task = SkedgyTaskBuilder::named("update_task")
             .at(run_at)
@@ -263,7 +262,7 @@ mod tests {
         let counter = Arc::new(Mutex::new(0));
         let handler = MockHandler::new(counter.clone(), None);
 
-        let scheduler = create_scheduler::<MockHandler>(Duration::from_millis(10), MockContext {});
+        let scheduler = create_scheduler(Duration::from_millis(10), MockContext {});
 
         let task = SkedgyTaskBuilder::named("cron_task")
             .cron("0/1 * * * * * *")

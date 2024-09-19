@@ -1,18 +1,19 @@
 use crate::{
     command::SkedgyCommand, config::SkedgyConfig, error::SkedgyError, handler::SkedgyHandler,
+    SkedgyContext,
 };
 
-use super::{SkedgyScheduler, SkedgyState, SkedgyTask};
+use super::{SkedgyScheduler, SkedgyTask};
 
 /// The main scheduler struct that allows you to schedule tasks to run at specific times, after delays, or using cron expressions.
 /// Create a new `Skedgy` instance using the `new` method and schedule tasks using the `run_at`, `run_in`, and `cron` methods.
-pub struct Skedgy<T: SkedgyHandler> {
-    tx: async_channel::Sender<SkedgyCommand<T>>,
+pub struct Skedgy<Ctx: SkedgyContext> {
+    tx: async_channel::Sender<SkedgyCommand<Ctx>>,
     terminate_tx: async_channel::Sender<async_channel::Sender<()>>,
 }
 
-impl<T: SkedgyHandler> Skedgy<T> {
-    pub fn new(config: SkedgyConfig, ctx: T::Context) -> Self {
+impl<Ctx: SkedgyContext> Skedgy<Ctx> {
+    pub fn new(config: SkedgyConfig, ctx: Ctx) -> Self {
         let (tx, rx) = async_channel::unbounded();
         let (terminate_tx, terminate_rx) = async_channel::bounded(1);
         let mut scheduler = SkedgyScheduler::new(config, rx, terminate_rx, ctx);
@@ -26,9 +27,12 @@ impl<T: SkedgyHandler> Skedgy<T> {
 
     /// Schedule a task to run at a specific `DateTime<Utc>`.
     /// The `handler` parameter should be a struct that implements the `SkedgyHandler` trait.
-    pub async fn schedule(&self, task: SkedgyTask<T>) -> Result<(), SkedgyError> {
+    pub async fn schedule<T: SkedgyHandler<Context = Ctx>>(
+        &self,
+        task: SkedgyTask<Ctx, T>,
+    ) -> Result<(), SkedgyError> {
         self.tx
-            .send(SkedgyCommand::Add(task))
+            .send(SkedgyCommand::Add(task.into()))
             .await
             .map_err(|_| SkedgyError::SendError)?;
         Ok(())
@@ -38,7 +42,7 @@ impl<T: SkedgyHandler> Skedgy<T> {
     /// The `id` parameter should be the ID returned by the `cron` method.
     pub async fn remove(&self, id: &str) -> Result<(), SkedgyError> {
         self.tx
-            .send(SkedgyCommand::<T>::Remove(id.to_string()))
+            .send(SkedgyCommand::<Ctx>::Remove(id.to_string()))
             .await
             .map_err(|_| SkedgyError::SendError)?;
         Ok(())
@@ -46,28 +50,12 @@ impl<T: SkedgyHandler> Skedgy<T> {
 
     /// Update an existing task with a new schedule.
     /// The `handler` parameter should be a struct that implements the `SkedgyHandler` trait.
-    pub async fn update(&self, task: SkedgyTask<T>) -> Result<(), SkedgyError> {
+    pub async fn update<T: SkedgyHandler<Context = Ctx>>(
+        &self,
+        task: SkedgyTask<Ctx, T>,
+    ) -> Result<(), SkedgyError> {
         self.tx
-            .send(SkedgyCommand::Update(task))
-            .await
-            .map_err(|_| SkedgyError::SendError)?;
-        Ok(())
-    }
-
-    /// Get the current state of the scheduler, including all scheduled tasks.
-    pub async fn state(&self) -> Result<SkedgyState<T>, SkedgyError> {
-        let (tx, rx) = async_channel::bounded(1);
-        self.tx
-            .send(SkedgyCommand::GetState(tx))
-            .await
-            .map_err(|_| SkedgyError::SendError)?;
-        rx.recv().await.map_err(|_| SkedgyError::RecvError)
-    }
-
-    /// Load a previous state into the scheduler.
-    pub async fn load(&self, state: SkedgyState<T>) -> Result<(), SkedgyError> {
-        self.tx
-            .send(SkedgyCommand::LoadState(state))
+            .send(SkedgyCommand::Update(task.into()))
             .await
             .map_err(|_| SkedgyError::SendError)?;
         Ok(())
