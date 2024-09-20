@@ -4,57 +4,72 @@ use chrono::{DateTime, Utc};
 use cron::Schedule;
 use nanoid::nanoid;
 
-use crate::{error::SkedgyError, handler::SkedgyHandler};
+use crate::{
+    error::SkedgyError,
+    handler::{DynHandler, SkedgyHandler},
+    Metadata, SkedgyContext,
+};
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub enum TaskKind {
-    #[cfg_attr(
-        feature = "serde",
-        serde(
-            serialize_with = "crate::utils::serialize_datetime",
-            deserialize_with = "crate::utils::deserialize_datetime"
-        )
-    )]
     At(DateTime<Utc>),
-
     In(Duration),
-
-    #[cfg_attr(
-        feature = "serde",
-        serde(
-            serialize_with = "crate::utils::serialize_schedule",
-            deserialize_with = "crate::utils::deserialize_schedule"
-        )
-    )]
     Cron(Schedule),
 }
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
-pub struct SkedgyTask<T: SkedgyHandler> {
+pub struct DynSkedgyTask<Ctx: SkedgyContext> {
+    pub(crate) id: String,
+    pub(crate) kind: TaskKind,
+    pub(crate) handler: Box<dyn DynHandler<Ctx>>,
+}
+
+impl<Ctx: SkedgyContext, T: SkedgyHandler<Context = Ctx>> From<SkedgyTask<Ctx, T>>
+    for DynSkedgyTask<Ctx>
+{
+    fn from(task: SkedgyTask<Ctx, T>) -> Self {
+        Self {
+            id: task.id,
+            kind: task.kind,
+            handler: Box::new(task.handler),
+        }
+    }
+}
+
+impl<Ctx: SkedgyContext> DynSkedgyTask<Ctx> {
+    pub async fn execute(self, context: &Ctx, metadata: Metadata) {
+        self.handler.clone().handle_dyn(context, metadata).await;
+    }
+}
+
+#[derive(Clone)]
+pub struct SkedgyTask<Ctx: SkedgyContext, T: SkedgyHandler<Context = Ctx>> {
     pub(crate) id: String,
     pub(crate) kind: TaskKind,
     pub(crate) handler: T,
 }
 
-impl<T: SkedgyHandler> SkedgyTask<T> {
-    pub fn named(id: &str) -> SkedgyTaskBuilder<T> {
+impl<Ctx: SkedgyContext, T: SkedgyHandler<Context = Ctx>> SkedgyTask<Ctx, T> {
+    pub fn named(id: &str) -> SkedgyTaskBuilder<Ctx, T> {
         SkedgyTaskBuilder::named(id)
     }
 
-    pub fn anonymous() -> SkedgyTaskBuilder<T> {
+    pub fn anonymous() -> SkedgyTaskBuilder<Ctx, T> {
         SkedgyTaskBuilder::new()
+    }
+
+    pub async fn execute(&self, context: &Ctx, metadata: Metadata) {
+        self.handler.handle(context, metadata).await;
     }
 }
 
-pub struct SkedgyTaskBuilder<T: SkedgyHandler> {
+pub struct SkedgyTaskBuilder<Ctx: SkedgyContext, T: SkedgyHandler<Context = Ctx>> {
     kind: Option<TaskKind>,
     handler: Option<T>,
     id: Option<String>,
 }
 
-impl<T: SkedgyHandler> SkedgyTaskBuilder<T> {
+impl<Ctx: SkedgyContext, T: SkedgyHandler<Context = Ctx>> SkedgyTaskBuilder<Ctx, T> {
     pub fn named(id: &str) -> Self {
         Self {
             kind: None,
@@ -71,18 +86,18 @@ impl<T: SkedgyHandler> SkedgyTaskBuilder<T> {
         }
     }
 
-    pub fn at(&mut self, datetime: DateTime<Utc>) -> &mut Self {
+    pub fn at_datetime(&mut self, datetime: DateTime<Utc>) -> &mut Self {
         self.kind = Some(TaskKind::At(datetime));
         self
     }
 
-    pub fn r#in(&mut self, duration: Duration) -> &mut Self {
+    pub fn in_duration(&mut self, duration: Duration) -> &mut Self {
         let datetime = Utc::now() + duration;
         self.kind = Some(TaskKind::At(datetime));
         self
     }
 
-    pub fn cron(&mut self, pattern: &str) -> Result<&mut Self, SkedgyError> {
+    pub fn on_cron(&mut self, pattern: &str) -> Result<&mut Self, SkedgyError> {
         let schedule = cron::Schedule::from_str(pattern).map_err(|_| SkedgyError::InvalidCron)?;
         self.kind = Some(TaskKind::Cron(schedule));
         Ok(self)
@@ -93,9 +108,9 @@ impl<T: SkedgyHandler> SkedgyTaskBuilder<T> {
         self
     }
 
-    pub fn build(&self) -> Result<SkedgyTask<T>, SkedgyError> {
+    pub fn build(&mut self) -> Result<SkedgyTask<Ctx, T>, SkedgyError> {
         let kind = self.kind.clone().ok_or(SkedgyError::InvalidCron)?;
-        let handler = self.handler.clone().ok_or(SkedgyError::InvalidCron)?;
+        let handler = self.handler.take().expect("Handler not set");
         let id = self.id.clone().unwrap_or_else(|| nanoid!(10));
         Ok(SkedgyTask { id, kind, handler })
     }
