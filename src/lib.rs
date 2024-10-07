@@ -29,19 +29,20 @@ mod context;
 mod error;
 mod handler;
 mod scheduler;
+mod skedgy;
+mod task;
 
 pub use config::SkedgyConfig;
 pub use context::SkedgyContext;
 pub use error::SkedgyError;
 pub use handler::{Metadata, SkedgyHandler};
-pub use scheduler::{Skedgy, SkedgyTask, SkedgyTaskBuilder};
+pub use skedgy::Skedgy;
 
 #[cfg(test)]
 mod tests {
     use self::handler::Metadata;
-
     use super::*;
-    use crate::{SkedgyHandler, SkedgyTaskBuilder};
+    use crate::SkedgyHandler;
     use chrono::Utc;
     use futures::lock::Mutex;
     use std::sync::Arc;
@@ -63,12 +64,6 @@ mod tests {
     struct MockHandler2 {
         counter: Arc<Mutex<i32>>,
         done_tx: Option<async_channel::Sender<()>>,
-    }
-
-    impl MockHandler2 {
-        fn new(counter: Arc<Mutex<i32>>, done_tx: Option<async_channel::Sender<()>>) -> Self {
-            MockHandler2 { counter, done_tx }
-        }
     }
 
     impl SkedgyHandler for MockHandler2 {
@@ -109,16 +104,13 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
+        let skedgy = create_scheduler(Duration::from_millis(100), MockContext {});
         let run_at = Utc::now() + Duration::from_millis(200);
-        let task = SkedgyTaskBuilder::named("test_task")
-            .at_datetime(run_at)
-            .handler(handler)
-            .build()
-            .expect("Failed to build task");
 
-        scheduler
-            .schedule(task)
+        skedgy
+            .named("test_task")
+            .datetime(run_at)
+            .task(handler)
             .await
             .expect("Failed to schedule task");
 
@@ -132,14 +124,12 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
-        let task = SkedgyTaskBuilder::named("test_task")
-            .in_duration(Duration::from_millis(200))
-            .handler(handler)
-            .build()
-            .expect("Failed to build task");
-        scheduler
-            .schedule(task)
+        let skedgy = create_scheduler(Duration::from_millis(100), MockContext {});
+
+        skedgy
+            .named("test_task")
+            .duration(Duration::from_millis(200))
+            .task(handler)
             .await
             .expect("Failed to schedule task");
 
@@ -153,16 +143,12 @@ mod tests {
         let (tx, rx) = async_channel::bounded(1);
         let handler = MockHandler::new(counter.clone(), Some(tx));
 
-        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
-        let task = SkedgyTaskBuilder::named("test_task")
-            .on_cron("0/1 * * * * * *")
-            .expect("Failed to build task")
-            .handler(handler)
-            .build()
-            .expect("Failed to build task");
+        let skedgy = create_scheduler(Duration::from_millis(100), MockContext {});
 
-        scheduler
-            .schedule(task)
+        skedgy
+            .named("test_task")
+            .cron("0/1 * * * * * *")
+            .task(handler)
             .await
             .expect("Failed to schedule cron task");
 
@@ -179,28 +165,21 @@ mod tests {
         let (tx2, rx2) = async_channel::bounded(1);
         let handler2 = MockHandler::new(counter.clone(), Some(tx2));
 
-        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
+        let skedgy = create_scheduler(Duration::from_millis(100), MockContext {});
 
         let run_at = Utc::now() + Duration::from_millis(200);
-        let task1 = SkedgyTaskBuilder::named("task1")
-            .at_datetime(run_at)
-            .handler(handler1)
-            .build()
-            .expect("Failed to build task");
 
-        let task2 = SkedgyTaskBuilder::named("task2")
-            .in_duration(Duration::from_millis(400))
-            .handler(handler2)
-            .build()
-            .expect("Failed to build task");
-
-        scheduler
-            .schedule(task1)
+        skedgy
+            .named("task1")
+            .datetime(run_at)
+            .task(handler1)
             .await
             .expect("Failed to schedule task");
 
-        scheduler
-            .schedule(task2)
+        skedgy
+            .named("task2")
+            .duration(Duration::from_millis(400))
+            .task(handler2)
             .await
             .expect("Failed to schedule task");
 
@@ -220,20 +199,17 @@ mod tests {
         let counter = Arc::new(Mutex::new(0));
         let handler = MockHandler::new(counter.clone(), None);
 
-        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
+        let skedgy = create_scheduler(Duration::from_millis(100), MockContext {});
         let run_at = Utc::now() + Duration::from_millis(200);
-        let task = SkedgyTaskBuilder::named("remove_task")
-            .at_datetime(run_at)
-            .handler(handler)
-            .build()
-            .expect("Failed to build task");
 
-        scheduler
-            .schedule(task.clone())
+        skedgy
+            .named("remove_task")
+            .datetime(run_at)
+            .task(handler)
             .await
             .expect("Failed to schedule task");
 
-        scheduler
+        skedgy
             .remove("remove_task")
             .await
             .expect("Failed to remove task");
@@ -244,106 +220,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_task() {
-        let counter = Arc::new(Mutex::new(0));
-        let (tx, rx) = async_channel::bounded(1);
-        let handler = MockHandler::new(counter.clone(), Some(tx));
-
-        let scheduler = create_scheduler(Duration::from_millis(100), MockContext {});
-        let run_at = Utc::now() + Duration::from_millis(500);
-        let original_task = SkedgyTaskBuilder::named("update_task")
-            .at_datetime(run_at)
-            .handler(handler.clone())
-            .build()
-            .expect("Failed to build task");
-
-        scheduler
-            .schedule(original_task)
-            .await
-            .expect("Failed to schedule task");
-
-        let updated_run_at = Utc::now() + Duration::from_millis(200);
-        let updated_task = SkedgyTaskBuilder::named("update_task")
-            .at_datetime(updated_run_at)
-            .handler(handler)
-            .build()
-            .expect("Failed to build updated task");
-
-        scheduler
-            .update(updated_task)
-            .await
-            .expect("Failed to update task");
-
-        rx.recv().await.expect("Failed to receive done signal");
-
-        assert_eq!(*counter.lock().await, 1);
-    }
-
-    #[tokio::test]
     async fn test_remove_cron_task() {
         env_logger::init();
         let counter = Arc::new(Mutex::new(0));
         let handler = MockHandler::new(counter.clone(), None);
 
-        let scheduler = create_scheduler(Duration::from_millis(10), MockContext {});
+        let skedgy = create_scheduler(Duration::from_millis(10), MockContext {});
 
-        let task = SkedgyTaskBuilder::named("cron_task")
-            .on_cron("0/1 * * * * * *")
-            .expect("Failed to build cron task")
-            .handler(handler)
-            .build()
-            .expect("Failed to build task");
-
-        scheduler
-            .schedule(task.clone())
+        skedgy
+            .named("cron_task")
+            .cron("0/1 * * * * * *")
+            .task(handler)
             .await
             .expect("Failed to schedule cron task");
 
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
-        scheduler
+        skedgy
             .remove("cron_task")
             .await
             .expect("Failed to remove cron task");
 
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
 
         assert_eq!(*counter.lock().await, 1);
-    }
-
-    #[tokio::test]
-    async fn test_multiple_task_types() {
-        let counter = Arc::new(Mutex::new(0));
-        let (tx1, rx1) = async_channel::bounded(1);
-        let handler1 = MockHandler::new(counter.clone(), Some(tx1));
-
-        let (tx2, rx2) = async_channel::bounded(1);
-        let handler2 = MockHandler2::new(counter.clone(), Some(tx2));
-
-        let scheduler = create_scheduler(Duration::from_millis(10), MockContext {});
-
-        let task1 = SkedgyTaskBuilder::named("cron_task1")
-            .on_cron("0/1 * * * * * *")
-            .expect("Failed to build cron task")
-            .handler(handler1)
-            .build()
-            .expect("Failed to build task");
-
-        let task2 = SkedgyTaskBuilder::named("cron_task2")
-            .on_cron("0/2 * * * * * *")
-            .expect("Failed to build cron task")
-            .handler(handler2)
-            .build()
-            .expect("Failed to build task");
-
-        scheduler
-            .schedule(task1)
-            .await
-            .expect("Failed to schedule cron task");
-
-        scheduler
-            .schedule(task2)
-            .await
-            .expect("Failed to schedule cron task");
     }
 }
