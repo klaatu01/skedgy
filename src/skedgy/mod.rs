@@ -1,15 +1,39 @@
+mod cron;
+mod datetime;
+mod duration;
+mod handler;
+mod named;
+mod schedule_builder;
+
+use datetime::DateTime;
+use std::borrow::Cow;
+
 use crate::{
     command::SkedgyCommand, config::SkedgyConfig, error::SkedgyError, handler::SkedgyHandler,
     SkedgyContext,
 };
 
-use super::{SkedgyScheduler, SkedgyTask};
+use self::cron::Cron;
+use self::datetime::IntoDateTime;
+use self::duration::{Duration, IntoDuration};
+use self::schedule_builder::ScheduleBuilder;
+use crate::scheduler::SkedgyScheduler;
+use crate::task::SkedgyTask;
 
 /// The main scheduler struct that allows you to schedule tasks to run at specific times, after delays, or using cron expressions.
 /// Create a new `Skedgy` instance using the `new` method and schedule tasks using the `run_at`, `run_in`, and `cron` methods.
 pub struct Skedgy<Ctx: SkedgyContext> {
     tx: async_channel::Sender<SkedgyCommand<Ctx>>,
     terminate_tx: async_channel::Sender<async_channel::Sender<()>>,
+}
+
+impl<Ctx: SkedgyContext> Clone for Skedgy<Ctx> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            terminate_tx: self.terminate_tx.clone(),
+        }
+    }
 }
 
 impl<Ctx: SkedgyContext> Skedgy<Ctx> {
@@ -27,7 +51,7 @@ impl<Ctx: SkedgyContext> Skedgy<Ctx> {
 
     /// Schedule a task to run at a specific `DateTime<Utc>`.
     /// The `handler` parameter should be a struct that implements the `SkedgyHandler` trait.
-    pub async fn schedule<T: SkedgyHandler<Context = Ctx>>(
+    pub(crate) async fn schedule<T: SkedgyHandler<Context = Ctx>>(
         &self,
         task: SkedgyTask<Ctx, T>,
     ) -> Result<(), SkedgyError> {
@@ -38,24 +62,50 @@ impl<Ctx: SkedgyContext> Skedgy<Ctx> {
         Ok(())
     }
 
+    pub fn named(&self, name: &str) -> named::Named<Ctx> {
+        let schedule_builder = ScheduleBuilder::new();
+        named::Named {
+            skedgy: Cow::Borrowed(self),
+            id: name.to_string(),
+            schedule_builder,
+        }
+    }
+
+    /// Schedule a task to run after at a specific `DateTime<Utc>`.
+    pub fn datetime(&self, resource: impl IntoDateTime) -> DateTime<Ctx> {
+        let schedule_builder = ScheduleBuilder::new();
+        DateTime {
+            skedgy: Cow::Borrowed(self),
+            datetime: resource.into_datetime(),
+            schedule_builder,
+        }
+    }
+
+    /// Schedule a task to run after a specific `Duration`.
+    pub fn duration(&self, duration: impl IntoDuration) -> Duration<Ctx> {
+        let schedule_builder = ScheduleBuilder::new();
+        Duration {
+            skedgy: Cow::Borrowed(self),
+            duration: duration.into_duration(),
+            schedule_builder,
+        }
+    }
+
+    /// Schedule a task to run using a cron expression.
+    pub fn cron(&self, cron: &str) -> Cron<Ctx> {
+        let schedule_builder = ScheduleBuilder::new();
+        cron::Cron {
+            skedgy: Cow::Borrowed(self),
+            cron: cron.to_string(),
+            schedule_builder,
+        }
+    }
+
     /// Remove a cron task by its ID.
     /// The `id` parameter should be the ID returned by the `cron` method.
     pub async fn remove(&self, id: &str) -> Result<(), SkedgyError> {
         self.tx
             .send(SkedgyCommand::<Ctx>::Remove(id.to_string()))
-            .await
-            .map_err(|_| SkedgyError::SendError)?;
-        Ok(())
-    }
-
-    /// Update an existing task with a new schedule.
-    /// The `handler` parameter should be a struct that implements the `SkedgyHandler` trait.
-    pub async fn update<T: SkedgyHandler<Context = Ctx>>(
-        &self,
-        task: SkedgyTask<Ctx, T>,
-    ) -> Result<(), SkedgyError> {
-        self.tx
-            .send(SkedgyCommand::Update(task.into()))
             .await
             .map_err(|_| SkedgyError::SendError)?;
         Ok(())
