@@ -1,8 +1,11 @@
-use std::str::FromStr;
+use std::{str::FromStr, sync::Arc};
 
 use nanoid::nanoid;
 
-use crate::{task::SkedgyTask, SkedgyError};
+use crate::{
+    task::{SkedgyTask, Task},
+    SkedgyError,
+};
 
 pub enum ScheduleType {
     Duration(std::time::Duration),
@@ -43,11 +46,7 @@ impl ScheduleBuilder {
         self
     }
 
-    pub fn task<Ctx, T>(self, handler: T) -> Result<SkedgyTask<Ctx, T>, SkedgyError>
-    where
-        Ctx: crate::SkedgyContext,
-        T: crate::SkedgyHandler<Context = Ctx>,
-    {
+    pub fn task(self, task: Arc<dyn Task>) -> Result<SkedgyTask, SkedgyError> {
         let id = self.id.unwrap_or_else(|| nanoid!(10));
         let kind = self.schedule_type.ok_or(SkedgyError::NoSchedule)?;
         let kind = match kind {
@@ -59,6 +58,6 @@ impl ScheduleBuilder {
             }
             ScheduleType::Timestamp(timestamp) => crate::task::TaskKind::At(timestamp),
         };
-        Ok(SkedgyTask { id, kind, handler })
+        Ok(SkedgyTask { id, kind, task })
     }
 }

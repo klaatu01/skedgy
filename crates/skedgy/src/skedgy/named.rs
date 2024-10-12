@@ -1,4 +1,4 @@
-use crate::{Skedgy, SkedgyContext};
+use crate::Skedgy;
 use std::borrow::Cow;
 
 use super::{
@@ -8,14 +8,14 @@ use super::{
     schedule_builder::ScheduleBuilder,
 };
 
-pub struct Named<'r, Ctx: SkedgyContext> {
-    pub(crate) skedgy: Cow<'r, Skedgy<Ctx>>,
+pub struct Named<'r> {
+    pub(crate) skedgy: Cow<'r, Skedgy>,
     pub(crate) id: String,
     pub(crate) schedule_builder: ScheduleBuilder,
 }
 
-impl<'r, Ctx: SkedgyContext> Named<'r, Ctx> {
-    pub fn datetime(self, datetime: impl IntoDateTime) -> DateTime<'r, Ctx> {
+impl<'r> Named<'r> {
+    pub fn datetime(self, datetime: impl IntoDateTime) -> DateTime<'r> {
         let schedule_builder = self.schedule_builder.id(&self.id);
         DateTime {
             skedgy: self.skedgy,
@@ -24,7 +24,7 @@ impl<'r, Ctx: SkedgyContext> Named<'r, Ctx> {
         }
     }
 
-    pub fn duration(self, duration: impl IntoDuration) -> Duration<'r, Ctx> {
+    pub fn duration(self, duration: impl IntoDuration) -> Duration<'r> {
         let schedule_builder = self.schedule_builder.id(&self.id);
         Duration {
             skedgy: self.skedgy,
@@ -33,7 +33,7 @@ impl<'r, Ctx: SkedgyContext> Named<'r, Ctx> {
         }
     }
 
-    pub fn cron(self, cron: &str) -> Cron<'r, Ctx> {
+    pub fn cron(self, cron: &str) -> Cron<'r> {
         let schedule_builder = self.schedule_builder.id(&self.id);
         Cron {
             skedgy: self.skedgy,

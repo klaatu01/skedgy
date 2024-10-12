@@ -1,5 +1,5 @@
-use crate::{Skedgy, SkedgyContext, SkedgyHandler};
-use std::borrow::Cow;
+use crate::{task::Task, Skedgy};
+use std::{borrow::Cow, sync::Arc};
 
 use super::{handler::Handler, schedule_builder::ScheduleBuilder};
 
@@ -19,18 +19,18 @@ impl IntoDuration for chrono::Duration {
     }
 }
 
-pub struct Duration<'r, Ctx: SkedgyContext> {
-    pub(crate) skedgy: Cow<'r, Skedgy<Ctx>>,
+pub struct Duration<'r> {
+    pub(crate) skedgy: Cow<'r, Skedgy>,
     pub(crate) duration: std::time::Duration,
     pub(crate) schedule_builder: ScheduleBuilder,
 }
 
-impl<'r, Ctx: SkedgyContext> Duration<'r, Ctx> {
-    pub fn task<T: SkedgyHandler<Context = Ctx>>(self, handler: T) -> Handler<'r, Ctx, T> {
+impl<'r> Duration<'r> {
+    pub fn task(self, task: impl Task + 'static) -> Handler<'r> {
         let schedule_builder = self.schedule_builder.duration(self.duration);
         Handler {
             skedgy: self.skedgy,
-            task: handler,
+            task: Arc::new(task),
             schedule_builder,
         }
     }

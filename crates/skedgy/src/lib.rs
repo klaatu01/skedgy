@@ -25,86 +25,72 @@
 //! This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 mod command;
 mod config;
-mod context;
+mod dep;
 mod error;
-mod handler;
 mod scheduler;
 mod skedgy;
 mod task;
 
 pub use config::SkedgyConfig;
-pub use context::SkedgyContext;
+pub use dep::{Dep, DependencyStore};
 pub use error::SkedgyError;
-pub use handler::{Metadata, SkedgyHandler};
 pub use skedgy::Skedgy;
+pub use skedgy_derive::task;
+pub use task::{BoxFuture, Task};
+
+#[task]
+async fn test() {
+    println!("Hello, world!");
+}
 
 #[cfg(test)]
 mod tests {
-    use self::handler::Metadata;
     use super::*;
-    use crate::SkedgyHandler;
     use chrono::Utc;
     use futures::lock::Mutex;
+    use skedgy_derive::task;
     use std::sync::Arc;
     use std::time::Duration;
 
-    #[derive(Clone)]
-    struct MockHandler {
+    #[task]
+    async fn mock_handler(counter: Arc<Mutex<i32>>, done_tx: Option<async_channel::Sender<()>>) {
+        let mut count = counter.lock().await;
+        *count += 1;
+        if let Some(tx) = done_tx {
+            tx.send(()).await.expect("Failed to send done signal");
+        }
+    }
+
+    #[task]
+    async fn handler_with_deps(
         counter: Arc<Mutex<i32>>,
+        dep: Dep<i32>,
         done_tx: Option<async_channel::Sender<()>>,
-    }
-
-    impl MockHandler {
-        fn new(counter: Arc<Mutex<i32>>, done_tx: Option<async_channel::Sender<()>>) -> Self {
-            MockHandler { counter, done_tx }
+    ) {
+        let mut count = counter.lock().await;
+        *count += *dep.inner();
+        if let Some(tx) = done_tx {
+            tx.send(()).await.expect("Failed to send done signal");
         }
     }
 
-    #[derive(Clone)]
-    struct MockHandler2 {
-        counter: Arc<Mutex<i32>>,
-        done_tx: Option<async_channel::Sender<()>>,
-    }
-
-    impl SkedgyHandler for MockHandler2 {
-        type Context = MockContext;
-        async fn handle(&self, _ctx: &Self::Context, _metadata: Metadata) {
-            let mut count = self.counter.lock().await;
-            *count += 1;
-            if let Some(tx) = &self.done_tx {
-                tx.send(()).await.expect("Failed to send done signal");
-            }
-        }
-    }
-
-    #[derive(Clone)]
-    struct MockContext {}
-
-    impl SkedgyHandler for MockHandler {
-        type Context = MockContext;
-        async fn handle(&self, _ctx: &Self::Context, _metadata: Metadata) {
-            let mut count = self.counter.lock().await;
-            *count += 1;
-            if let Some(tx) = &self.done_tx {
-                tx.send(()).await.expect("Failed to send done signal");
-            }
-        }
-    }
-
-    fn create_scheduler<Ctx: SkedgyContext>(tick_interval: Duration, ctx: Ctx) -> Skedgy<Ctx> {
+    fn create_scheduler(tick_interval: Duration) -> Skedgy {
         let config = SkedgyConfig {
             look_ahead_duration: tick_interval,
         };
-        Skedgy::new(config, ctx)
+        let mut dep_store = DependencyStore::new();
+        dep_store.insert::<i32>(10);
+
+        Skedgy::new(config, dep_store)
     }
 
     #[tokio::test]
     async fn test_run_at() {
         let counter = Arc::new(Mutex::new(0));
         let (tx, rx) = async_channel::bounded(1);
-        let handler = MockHandler::new(counter.clone(), Some(tx));
+        let handler = mock_handler::new(counter.clone(), Some(tx));
 
-        let skedgy = create_scheduler(Duration::from_millis(100), MockContext {});
+        let skedgy = create_scheduler(Duration::from_millis(100));
         let run_at = Utc::now() + Duration::from_millis(200);
 
         skedgy
@@ -122,9 +108,9 @@ mod tests {
     async fn test_run_in() {
         let counter = Arc::new(Mutex::new(0));
         let (tx, rx) = async_channel::bounded(1);
-        let handler = MockHandler::new(counter.clone(), Some(tx));
+        let handler = mock_handler::new(counter.clone(), Some(tx));
 
-        let skedgy = create_scheduler(Duration::from_millis(100), MockContext {});
+        let skedgy = create_scheduler(Duration::from_millis(100));
 
         skedgy
             .named("test_task")
@@ -141,9 +127,9 @@ mod tests {
     async fn test_cron() {
         let counter = Arc::new(Mutex::new(0));
         let (tx, rx) = async_channel::bounded(1);
-        let handler = MockHandler::new(counter.clone(), Some(tx));
+        let handler = mock_handler::new(counter.clone(), Some(tx));
 
-        let skedgy = create_scheduler(Duration::from_millis(100), MockContext {});
+        let skedgy = create_scheduler(Duration::from_millis(100));
 
         skedgy
             .named("test_task")
@@ -160,12 +146,12 @@ mod tests {
     async fn test_multiple_schedules() {
         let counter = Arc::new(Mutex::new(0));
         let (tx1, rx1) = async_channel::bounded(1);
-        let handler1 = MockHandler::new(counter.clone(), Some(tx1));
+        let handler1 = mock_handler::new(counter.clone(), Some(tx1));
 
         let (tx2, rx2) = async_channel::bounded(1);
-        let handler2 = MockHandler::new(counter.clone(), Some(tx2));
+        let handler2 = mock_handler::new(counter.clone(), Some(tx2));
 
-        let skedgy = create_scheduler(Duration::from_millis(100), MockContext {});
+        let skedgy = create_scheduler(Duration::from_millis(100));
 
         let run_at = Utc::now() + Duration::from_millis(200);
 
@@ -197,9 +183,9 @@ mod tests {
     #[tokio::test]
     async fn test_remove_task() {
         let counter = Arc::new(Mutex::new(0));
-        let handler = MockHandler::new(counter.clone(), None);
+        let handler = mock_handler::new(counter.clone(), None);
 
-        let skedgy = create_scheduler(Duration::from_millis(100), MockContext {});
+        let skedgy = create_scheduler(Duration::from_millis(100));
         let run_at = Utc::now() + Duration::from_millis(200);
 
         skedgy
@@ -223,9 +209,9 @@ mod tests {
     async fn test_remove_cron_task() {
         env_logger::init();
         let counter = Arc::new(Mutex::new(0));
-        let handler = MockHandler::new(counter.clone(), None);
+        let handler = mock_handler::new(counter.clone(), None);
 
-        let skedgy = create_scheduler(Duration::from_millis(10), MockContext {});
+        let skedgy = create_scheduler(Duration::from_millis(10));
 
         skedgy
             .named("cron_task")
@@ -244,5 +230,25 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
         assert_eq!(*counter.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_dependency_injection() {
+        let counter = Arc::new(Mutex::new(0));
+        let (tx, rx) = async_channel::bounded(1);
+        let handler = handler_with_deps::new(counter.clone(), Some(tx));
+
+        let skedgy = create_scheduler(Duration::from_millis(100));
+        let run_at = Utc::now() + Duration::from_millis(200);
+
+        skedgy
+            .named("test_task")
+            .datetime(run_at)
+            .task(handler)
+            .await
+            .expect("Failed to schedule task");
+
+        rx.recv().await.expect("Failed to receive done signal");
+        assert_eq!(*counter.lock().await, 10);
     }
 }

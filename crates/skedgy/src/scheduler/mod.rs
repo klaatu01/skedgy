@@ -1,33 +1,33 @@
-mod dyn_task;
-
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 use cron::Schedule;
+use tokio::sync::RwLock;
 
 use crate::{
-    command::SkedgyCommand, config::SkedgyConfig, error::SkedgyError, handler::Metadata,
-    task::TaskKind, SkedgyContext,
+    command::SkedgyCommand,
+    config::SkedgyConfig,
+    dep::DependencyStore,
+    error::SkedgyError,
+    task::{SkedgyTask, TaskKind},
 };
 
-pub(crate) use self::dyn_task::DynSkedgyTask;
-
-pub(crate) struct SkedgyScheduler<Ctx: SkedgyContext> {
+pub(crate) struct SkedgyScheduler {
     config: SkedgyConfig,
-    schedules: BTreeMap<DateTime<Utc>, Vec<DynSkedgyTask<Ctx>>>,
-    crons: Vec<(cron::Schedule, DynSkedgyTask<Ctx>)>,
+    schedules: BTreeMap<DateTime<Utc>, Vec<SkedgyTask>>,
+    crons: Vec<(cron::Schedule, SkedgyTask)>,
     last_cron_run: DateTime<Utc>,
-    rx: async_channel::Receiver<SkedgyCommand<Ctx>>,
+    rx: async_channel::Receiver<SkedgyCommand>,
     terminate_rx: async_channel::Receiver<async_channel::Sender<()>>,
-    ctx: std::sync::Arc<tokio::sync::RwLock<Ctx>>,
+    deps: Arc<tokio::sync::RwLock<DependencyStore>>,
 }
 
-impl<Ctx: SkedgyContext> SkedgyScheduler<Ctx> {
+impl SkedgyScheduler {
     pub(crate) fn new(
         config: SkedgyConfig,
-        rx: async_channel::Receiver<SkedgyCommand<Ctx>>,
+        rx: async_channel::Receiver<SkedgyCommand>,
         terminate_rx: async_channel::Receiver<async_channel::Sender<()>>,
-        ctx: Ctx,
+        deps: Arc<RwLock<DependencyStore>>,
     ) -> Self {
         Self {
             config,
@@ -35,16 +35,16 @@ impl<Ctx: SkedgyContext> SkedgyScheduler<Ctx> {
             crons: Vec::new(),
             rx,
             terminate_rx,
-            ctx: std::sync::Arc::new(tokio::sync::RwLock::new(ctx)),
             last_cron_run: Utc::now().with_nanosecond(0).unwrap(),
+            deps,
         }
     }
 
-    fn insert(&mut self, datetime: DateTime<Utc>, task: DynSkedgyTask<Ctx>) {
+    fn insert(&mut self, datetime: DateTime<Utc>, task: SkedgyTask) {
         self.schedules.entry(datetime).or_default().push(task);
     }
 
-    fn insert_cron(&mut self, schedule: Schedule, task: DynSkedgyTask<Ctx>) {
+    fn insert_cron(&mut self, schedule: Schedule, task: SkedgyTask) {
         self.crons.push((schedule, task));
     }
 
@@ -52,7 +52,7 @@ impl<Ctx: SkedgyContext> SkedgyScheduler<Ctx> {
         self.crons.retain(|(_, task)| task.id != id);
     }
 
-    fn query(&mut self, end: DateTime<Utc>) -> Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)> {
+    fn query(&mut self, end: DateTime<Utc>) -> Vec<(DateTime<Utc>, SkedgyTask)> {
         let after = self.schedules.split_off(&end);
         let before = self
             .schedules
@@ -61,7 +61,7 @@ impl<Ctx: SkedgyContext> SkedgyScheduler<Ctx> {
                 tasks
                     .iter()
                     .map(move |task| (*datetime, task.clone()))
-                    .collect::<Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)>>()
+                    .collect::<Vec<(DateTime<Utc>, SkedgyTask)>>()
             })
             .collect();
         self.schedules = after;
@@ -72,7 +72,7 @@ impl<Ctx: SkedgyContext> SkedgyScheduler<Ctx> {
         &mut self,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
-    ) -> Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)> {
+    ) -> Vec<(DateTime<Utc>, SkedgyTask)> {
         self.crons
             .iter()
             .filter_map(|(schedule, task)| {
@@ -93,7 +93,7 @@ impl<Ctx: SkedgyContext> SkedgyScheduler<Ctx> {
             .collect()
     }
 
-    async fn drain_channel(&mut self) -> Result<Vec<SkedgyCommand<Ctx>>, SkedgyError> {
+    async fn drain_channel(&mut self) -> Result<Vec<SkedgyCommand>, SkedgyError> {
         let mut commands = Vec::new();
         loop {
             match self.rx.try_recv() {
@@ -109,37 +109,27 @@ impl<Ctx: SkedgyContext> SkedgyScheduler<Ctx> {
         }
     }
 
-    fn handle_schedules(&self, tasks: Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)>) {
-        let tasks: Vec<_> = tasks
-            .into_iter()
-            .map(|(datetime, task)| {
-                let ctx = self.ctx.clone();
-                let metdata = Metadata {
-                    id: task.id.clone(),
-                    target_time: datetime,
-                };
-                (ctx, metdata, task)
-            })
-            .collect();
+    fn handle_schedules(&self, tasks: Vec<(DateTime<Utc>, SkedgyTask)>) {
+        let deps = self.deps.clone();
         tokio::spawn(async move {
-            futures::future::join_all(tasks.into_iter().map(|(ctx, metdata, task)| {
-                let ctx = ctx.clone();
+            futures::future::join_all(tasks.into_iter().map(|(_, task)| {
+                let deps = deps.clone();
                 async move {
-                    let ctx = ctx.read().await;
-                    task.execute(&*ctx, metdata).await;
+                    let deps = deps.read().await;
+                    task.execute(&*deps).await;
                 }
             }))
             .await;
         });
     }
 
-    async fn handle_commands(&mut self, commands: Vec<SkedgyCommand<Ctx>>) {
+    async fn handle_commands(&mut self, commands: Vec<SkedgyCommand>) {
         for command in commands {
             self.handle_command(command).await;
         }
     }
 
-    async fn handle_command(&mut self, command: SkedgyCommand<Ctx>) {
+    async fn handle_command(&mut self, command: SkedgyCommand) {
         match command {
             SkedgyCommand::Add(task) => match task.kind {
                 TaskKind::At(datetime) => self.insert(datetime, task),
@@ -158,7 +148,7 @@ impl<Ctx: SkedgyContext> SkedgyScheduler<Ctx> {
         }
     }
 
-    fn next_batch(&mut self, from: DateTime<Utc>) -> Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)> {
+    fn next_batch(&mut self, from: DateTime<Utc>) -> Vec<(DateTime<Utc>, SkedgyTask)> {
         let look_ahead_time = from + self.config.look_ahead_duration;
         let look_behind_time = from - Duration::milliseconds(1);
 
@@ -250,7 +240,7 @@ impl<Ctx: SkedgyContext> SkedgyScheduler<Ctx> {
                             }
                         }
                         _ = tokio::time::sleep(sleep_duration.to_std().unwrap_or_default()) => {
-                            let next_batch: Vec<(DateTime<Utc>, DynSkedgyTask<Ctx>)> = self.next_batch(next_schedule_time);
+                            let next_batch: Vec<(DateTime<Utc>, SkedgyTask)> = self.next_batch(next_schedule_time);
                             self.handle_schedules(next_batch);
                         }
                     }
