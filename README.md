@@ -9,7 +9,6 @@ Skedgy is a lightweight, asynchronous task scheduler written in Rust. It allows 
 - **Cron Scheduling**: Use cron expressions for recurring tasks.
 - **Asynchronous Execution**: Built with `tokio` for seamless async integration.
 - **Dynamic Task Management**: Add, remove, and manage tasks at runtime.
-- **Custom Context and Metadata**: Pass custom context and metadata to tasks for flexible execution.
 - **Dependency Injection**: Inject dependencies into tasks for easy access to shared resources.
 
 ## Installation
