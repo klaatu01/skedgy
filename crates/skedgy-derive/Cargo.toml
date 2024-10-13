@@ -2,10 +2,11 @@
 name = "skedgy-derive"
 version = "0.0.3"
 edition = "2021"
+license = "MIT"
 description = "Derive macros for the skedgy crate"
 repository = "https://github.com/klaatu01/skedgy-derive"
 documentation = "https://docs.rs/klaatu01/0.0.3/skedgy-derive/"
-readme = "README.md"
+readme = "../../README.md"
 keywords = ["scheduler", "async", "job", "cron", "schedule"]
 
 [lib]
