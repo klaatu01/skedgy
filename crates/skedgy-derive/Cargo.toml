@@ -1,0 +1,19 @@
+[package]
+name = "skedgy-derive"
+version = "0.0.3"
+edition = "2021"
+description = "Derive macros for the skedgy crate"
+repository = "https://github.com/klaatu01/skedgy-derive"
+documentation = "https://docs.rs/klaatu01/0.0.3/skedgy-derive/"
+readme = "README.md"
+keywords = ["scheduler", "async", "job", "cron", "schedule"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+convert_case = "0.6.0"
+proc-macro-crate = "3.2.0"
+proc-macro2 = { workspace = true, features = ["proc-macro"] }
+quote = { workspace = true, features = ["proc-macro"] }
+syn = { workspace = true, features = ["clone-impls", "derive", "parsing", "printing", "proc-macro"] }

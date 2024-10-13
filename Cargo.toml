@@ -1,26 +1,14 @@
-[package]
-name = "skedgy"
-version = "0.0.2"
-edition = "2021"
-license = "MIT"
-description = "A simple asynchronous job scheduler"
-repository = "https://github.com/klaatu01/skedgy"
-documentation = "https://docs.rs/klaatu01/0.0.2/skedgy/"
-readme = "README.md"
-keywords = ["scheduler", "async", "job", "cron", "schedule"]
+[workspace]
+members = [
+    "crates/skedgy", "crates/skedgy-derive",
+]
 
-[dependencies]
-async-channel = "2.3.1"
-cfg-if = "1.0.0"
-chrono = "0.4.38"
-cron = "0.12.1"
-dyn-clone = "1.0.17"
-env_logger = "0.11.5"
-futures = "0.3.30"
-humantime = "2.1.0"
-log = "0.4.22"
-nanoid = "0.4.0"
-tokio = { version = "1.40.0", features = ["time", "rt", "macros", "sync"] }
+resolver = "2"
 
-[features]
-default = []
+[patch.crates-io]
+skedgy = { path = "crates/skedgy" }
+
+[workspace.dependencies]
+proc-macro2 = { version = "1.0.87", default-features = false }
+quote = { version = "1.0.37", default-features = false }
+syn = { version = "2.0.79", default-features = false }

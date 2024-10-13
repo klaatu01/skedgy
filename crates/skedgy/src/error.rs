@@ -13,6 +13,8 @@ pub enum SkedgyError {
     TickError,
     /// The task could not be created because it has no schedule.
     NoSchedule,
+    /// No task was found provided.
+    NoTask,
 }
 
 impl Error for SkedgyError {}
@@ -25,6 +27,7 @@ impl std::fmt::Display for SkedgyError {
             SkedgyError::InvalidCron => write!(f, "Invalid cron expression"),
             SkedgyError::TickError => write!(f, "Error during scheduler tick"),
             SkedgyError::NoSchedule => write!(f, "Task has no schedule"),
+            SkedgyError::NoTask => write!(f, "No task provided"),
         }
     }
 }
