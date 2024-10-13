@@ -116,7 +116,7 @@ impl SkedgyScheduler {
                 let deps = deps.clone();
                 async move {
                     let deps = deps.read().await;
-                    task.execute(&*deps).await;
+                    task.execute(&deps).await;
                 }
             }))
             .await;

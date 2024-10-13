@@ -17,8 +17,10 @@ impl<T> Dep<T> {
     pub fn inner(&self) -> &T {
         &self.dep
     }
+}
 
-    pub fn clone(&self) -> Self {
+impl<T> Clone for Dep<T> {
+    fn clone(&self) -> Self {
         Dep {
             dep: self.dep.clone(),
         }
@@ -45,6 +47,12 @@ impl DependencyStore {
         self.states
             .get(&TypeId::of::<T>())
             .and_then(|boxed_any| boxed_any.downcast_ref::<Dep<T>>())
-            .map(|state| state.clone())
+            .cloned()
+    }
+}
+
+impl Default for DependencyStore {
+    fn default() -> Self {
+        Self::new()
     }
 }
