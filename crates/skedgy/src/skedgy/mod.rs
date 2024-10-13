@@ -20,8 +20,6 @@ use self::schedule_builder::ScheduleBuilder;
 use crate::scheduler::SkedgyScheduler;
 use crate::task::SkedgyTask;
 
-/// The main scheduler struct that allows you to schedule tasks to run at specific times, after delays, or using cron expressions.
-/// Create a new `Skedgy` instance using the `new` method and schedule tasks using the `run_at`, `run_in`, and `cron` methods.
 pub struct Skedgy {
     tx: async_channel::Sender<SkedgyCommand>,
     terminate_tx: async_channel::Sender<async_channel::Sender<()>>,
@@ -56,11 +54,15 @@ impl Skedgy {
         }
     }
 
+    pub fn builder() -> SkedgyBuilder {
+        SkedgyBuilder::default()
+    }
+
     /// Schedule a task to run at a specific `DateTime<Utc>`.
     /// The `handler` parameter should be a struct that implements the `SkedgyHandler` trait.
     pub(crate) async fn schedule(&self, task: SkedgyTask) -> Result<(), SkedgyError> {
         self.tx
-            .send(SkedgyCommand::Add(task.into()))
+            .send(SkedgyCommand::Add(task))
             .await
             .map_err(|_| SkedgyError::SendError)?;
         Ok(())
@@ -123,5 +125,39 @@ impl Skedgy {
             .map_err(|_| SkedgyError::SendError)?;
         rx.recv().await.map_err(|_| SkedgyError::RecvError)?;
         Ok(())
+    }
+}
+
+pub struct SkedgyBuilder {
+    config: SkedgyConfig,
+    dependency_store: DependencyStore,
+}
+
+impl SkedgyBuilder {
+    pub fn new() -> Self {
+        Self {
+            config: SkedgyConfig::default(),
+            dependency_store: DependencyStore::new(),
+        }
+    }
+
+    pub fn look_ahead_duration(mut self, look_ahead_duration: std::time::Duration) -> Self {
+        self.config.look_ahead_duration = look_ahead_duration;
+        self
+    }
+
+    pub fn manage<T: Sync + Send + 'static>(mut self, dependency: T) -> Self {
+        self.dependency_store.insert(dependency);
+        self
+    }
+
+    pub fn build(self) -> Skedgy {
+        Skedgy::new(self.config, self.dependency_store)
+    }
+}
+
+impl Default for SkedgyBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }

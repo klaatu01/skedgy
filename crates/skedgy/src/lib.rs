@@ -38,11 +38,6 @@ pub use skedgy::Skedgy;
 pub use skedgy_derive::task;
 pub use task::{BoxFuture, Task};
 
-#[task]
-async fn test() {
-    println!("Hello, world!");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,13 +70,10 @@ mod tests {
     }
 
     fn create_scheduler(tick_interval: Duration) -> Skedgy {
-        let config = SkedgyConfig {
-            look_ahead_duration: tick_interval,
-        };
-        let mut dep_store = DependencyStore::new();
-        dep_store.insert::<i32>(10);
-
-        Skedgy::new(config, dep_store)
+        Skedgy::builder()
+            .look_ahead_duration(tick_interval)
+            .manage::<i32>(10)
+            .build()
     }
 
     #[tokio::test]

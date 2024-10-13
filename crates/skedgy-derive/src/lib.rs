@@ -1,3 +1,5 @@
+//! skedgy-derive is a procedural macro crate that provides the `task` attribute macro.
+//! The `task` attribute macro is used to define a task that can be scheduled by the `skedgy` crate.
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use syn::{parse::Parser, parse_macro_input, ItemFn};
@@ -10,8 +12,6 @@ fn is_dependency_type(ty: &syn::Type) -> bool {
     }
     false
 }
-
-// when given a type like `Dep<i32>`, this function will return `i32`
 
 fn get_dependency_type(ty: &syn::Type) -> syn::Type {
     if let syn::Type::Path(type_path) = ty {
@@ -52,11 +52,12 @@ fn get_struct_name_ident(attr: &TokenStream, input_fn: &syn::ItemFn) -> syn::Ide
 #[proc_macro_attribute]
 pub fn task(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let found_crate =
-        proc_macro_crate::crate_name("skedgy").expect("my-crate is present in `Cargo.toml`");
+        proc_macro_crate::crate_name("skedgy").expect("skedgy is present in `Cargo.toml`");
     let crate_name = match found_crate {
         proc_macro_crate::FoundCrate::Itself => quote::quote!(crate),
         proc_macro_crate::FoundCrate::Name(name) => {
-            quote::quote! { #name }
+            let name_ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+            quote::quote! { #name_ident }
         }
     };
     let input_fn = parse_macro_input!(item as ItemFn);

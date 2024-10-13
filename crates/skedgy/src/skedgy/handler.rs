@@ -17,8 +17,8 @@ impl<'r> IntoFuture for Handler<'r> {
     type IntoFuture = BoxFuture<'r, Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
+        let task = self.schedule_builder.task(self.task).build();
         Box::pin(async move {
-            let task = self.schedule_builder.task(self.task);
             match task {
                 Ok(task) => self.skedgy.schedule(task).await,
                 Err(e) => Err(e),

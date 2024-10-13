@@ -10,6 +10,7 @@ Skedgy is a lightweight, asynchronous task scheduler written in Rust. It allows 
 - **Asynchronous Execution**: Built with `tokio` for seamless async integration.
 - **Dynamic Task Management**: Add, remove, and manage tasks at runtime.
 - **Custom Context and Metadata**: Pass custom context and metadata to tasks for flexible execution.
+- **Dependency Injection**: Inject dependencies into tasks for easy access to shared resources.
 
 ## Installation
 
@@ -17,7 +18,7 @@ Add Skedgy to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-skedgy = "0.1.0"
+skedgy = "0.3.0"
 ```
 
 Or use Cargo to add it directly:
@@ -31,49 +32,50 @@ cargo add skedgy
 ### Basic Example
 
 ```rust
-use skedgy::{Skedgy, SkedgyConfig, SkedgyHandler, Metadata, SkedgyContext};
-use chrono::Utc;
+use skedgy::{task, Skedgy};
+use std::error::Error;
 use std::time::Duration;
-use async_trait::async_trait;
-use tokio::sync::Mutex;
-use std::sync::Arc;
 
-#[derive(Clone)]
-struct MyContext;
-
-#[derive(Clone)]
-struct MyTaskHandler;
-
-#[async_trait]
-impl SkedgyHandler for MyTaskHandler {
-    type Context = MyContext;
-
-    async fn handle(&self, _ctx: &Self::Context, _metadata: Metadata) {
-        println!("Task executed at {:?}", Utc::now());
-    }
+#[task]
+async fn delayed_hello() {
+    println!("Hello!");
 }
 
 #[tokio::main]
-async fn main() {
-    let config = SkedgyConfig {
-        look_ahead_duration: Duration::from_secs(60),
-    };
-    let context = MyContext;
-    let skedgy = Skedgy::new(config, context);
+async fn main() -> Result<(), Box<dyn Error>> {
+    let skedgy = Skedgy::builder().build();
 
-    let handler = MyTaskHandler;
-
-    // Schedule a task to run in 5 seconds
     skedgy
-        .named("my_task")
         .duration(Duration::from_secs(5))
-        .task(handler.clone())
-        .await
-        .expect("Failed to schedule task");
+        .task(delayed_hello::new())
+        .await?;
 
-    // Keep the application running
-    tokio::signal::ctrl_c().await.unwrap();
+    // Keep the main task alive to allow the scheduled task to execute
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    Ok(())
 }
+```
+
+### Scheduling in a duration
+
+```rust
+skedgy
+    .duration(Duration::from_secs(5))
+    .task(delayed_hello::new())
+    .await
+    .expect("Failed to schedule task");
+```
+
+### Scheduling at a specific time
+
+```rust
+use chrono::{DateTime, Utc};
+
+skedgy
+    .datetime(chrono::Utc::now() + chrono::Duration::seconds(5))
+    .task(delayed_hello::new())
+    .await
+    .expect("Failed to schedule task");
 ```
 
 ### Scheduling with Cron Expressions
@@ -83,7 +85,7 @@ async fn main() {
 skedgy
     .named("cron_task")
     .cron("0/5 * * * * * *") // Every 5 seconds
-    .task(handler.clone())
+    .task(delayed_hello::new())
     .await
     .expect("Failed to schedule cron task");
 ```
@@ -98,45 +100,79 @@ skedgy
     .expect("Failed to remove task");
 ```
 
-### Custom Context and Metadata
+### Adding dependencies to tasks
 
-You can pass a custom context to your tasks for more flexible execution:
+This can be useful if you want tasks to be able to acces some 'global' state, such as a database connection or a channel to send messages to.
+You can only provide on dependency per type, so if you need multiple instances of the same type, I suggest wrapping them in a struct.
 
 ```rust
-#[derive(Clone)]
-struct MyContext {
-    db_connection: Arc<Mutex<DbConnection>>,
+use async_channel::Sender;
+use skedgy::{task, Dep, Skedgy};
+use std::error::Error;
+use std::time::Duration;
+
+#[task]
+async fn send_delayed_message(message: String, sender: Dep<Sender<String>>) {
+    let _ = sender.inner().send(message.clone()).await;
 }
 
-#[derive(Clone)]
-struct MyTaskHandler;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let (sender, receiver) = async_channel::unbounded::<String>();
+    let skedgy = Skedgy::builder()
+        .manage(sender) // Add the sender to the dependency manager
+        .build();
 
-#[async_trait]
-impl SkedgyHandler for MyTaskHandler {
-    type Context = MyContext;
+    skedgy
+        .duration(Duration::from_secs(5))
+        .task(send_delayed_message::new("Hello!".to_string()))
+        .await?;
 
-    async fn handle(&self, ctx: &Self::Context, metadata: Metadata) {
-        let db = ctx.db_connection.lock().await;
-        // Use the database connection
+    let message = receiver.recv().await.unwrap();
+    println!("Received message: {}", message);
+
+    Ok(())
+}
+```
+
+In this example the `send_delayed_message` task has a dependency on a `Sender<String>`.
+The sender is added to the dependency manager when the `Skedgy` instance is created.
+The procedural macro expands `send_delayed_message` out to the following code:
+
+```rust
+pub(crate) mod send_delayed_message {
+    use super::*;
+    use skedgy::BoxFuture;
+    use skedgy::DependencyStore;
+    use skedgy::Task;
+    pub fn new(message: String) -> SendDelayedMessage {
+        SendDelayedMessage { message: message }
+    }
+    pub struct SendDelayedMessage {
+        message: String,
+    }
+    impl SendDelayedMessage {
+        pub fn new(message: String) -> Self {
+            Self { message: message }
+        }
+        pub async fn execute(&self, sender: impl Into<Dep<Sender<String>>>) -> () {
+            let message = &self.message;
+            let sender = sender.into();
+            {
+                let _ = sender.inner().send(message.clone()).await;
+            }
+        }
+    }
+    impl Task for SendDelayedMessage {
+        fn run(&self, dep_store: &DependencyStore) -> BoxFuture<'_, ()> {
+            let sender = dep_store.get::<Sender<String>>().unwrap();
+            Box::pin(async move {
+                self.execute(sender).await;
+            })
+        }
     }
 }
 ```
-
-## Testing
-
-To run the test suite:
-
-```bash
-cargo test
-```
-
-The test suite includes tests for:
-
-- Scheduling tasks at specific times.
-- Scheduling tasks after delays.
-- Scheduling tasks with cron expressions.
-- Error handling for invalid cron expressions.
-- Adding and removing tasks dynamically.
 
 ## Contributing
 
