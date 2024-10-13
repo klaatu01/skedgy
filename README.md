@@ -18,7 +18,7 @@ Add Skedgy to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-skedgy = "0.3.0"
+skedgy = "0.0.3"
 ```
 
 Or use Cargo to add it directly:
