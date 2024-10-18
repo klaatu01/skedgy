@@ -102,7 +102,7 @@ skedgy
 ### Adding dependencies to tasks
 
 This can be useful if you want tasks to be able to acces some 'global' state, such as a database connection or a channel to send messages to.
-You can only provide on dependency per type, so if you need multiple instances of the same type, I suggest wrapping them in a struct.
+You can only provide one dependency per type, so if you need multiple instances of the same type, I suggest wrapping them in a struct.
 
 ```rust
 use async_channel::Sender;
